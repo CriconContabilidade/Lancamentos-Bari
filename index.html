@@ -177,7 +177,7 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
   <!-- ===================== BAIXAS DE SERVIÇOS ===================== -->
   <div class="card">
     <div class="section-title">Baixas de Serviços</div>
-    <div class="help">Casa o relatório <b>Contas a Receber por Cliente</b> com os pagamentos recebidos, e gera <code>baixa_ser.txt</code> pro Domínio. Duas fontes de pagamento, pode usar uma ou as duas: o <b>Relatório de Liquidação e Baixa</b> do Sicoob (recomendado — casa direto pelo número da NF, sem chute) e/ou o <b>extrato bancário</b> (casa por soma exata numa janela entre vencimento e crédito, mesma lógica da Baixas de Parcelas). O cadastro de CNPJ é o mesmo compartilhado com o resto do escritório.</div>
+    <div class="help">Casa o relatório <b>Contas a Receber por Cliente</b> com o <b>Relatório de Liquidação e Baixa</b> do Sicoob — casa direto pelo número da NF em "Seu Número", sem chute, e é a fonte confiável. O grupo "Baixa - Pedido Cedente" desse relatório é ignorado (não é dinheiro recebido). O cadastro de CNPJ é o mesmo compartilhado com o resto do escritório.</div>
     <div class="field-row">
       <div class="field">
         <label>Contas a Receber por Cliente (PDF)</label>
@@ -187,10 +187,13 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
         <label>Relatório de Liquidação e Baixa (Excel)</label>
         <div class="dropzone small-drop" id="liquidacaoDrop"><div class="big">Arraste o Excel aqui</div><div class="small">Consulta_Titulos_por_Periodo — casa direto pela NF em "Seu Número"</div><input type="file" id="liquidacaoFile" accept=".xlsx,.xls"></div>
       </div>
-      <div class="field">
-        <label>Extrato Sicoob (PDF) — opcional</label>
-        <div class="dropzone small-drop" id="extratoDrop"><div class="big">Arraste o PDF aqui</div><div class="small">Complementa o que não estiver no relatório de liquidação (créditos de cobrança/Pix recebido)</div><input type="file" id="extratoFile" accept="application/pdf"></div>
-      </div>
+    </div>
+    <div class="field" style="max-width:520px;margin-bottom:10px;">
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;text-transform:none;font-family:'IBM Plex Sans',sans-serif;font-size:13px;color:var(--ink);">
+        <input type="checkbox" id="usarExtratoFallback" style="margin-top:3px;">
+        <span>Também tentar casar pelo extrato bancário o que sobrar (<b style="color:var(--red)">menos confiável</b> — o extrato não tem o nome de quem pagou, só o valor, então pode juntar parcelas de clientes diferentes por coincidência de soma. Já aconteceu de gerar notas inexistentes. Confira cada linha marcada "via extrato" com atenção antes de exportar.)</span>
+      </label>
+      <div class="dropzone small-drop hidden" id="extratoDrop" style="margin-top:8px;"><div class="big">Arraste o PDF do extrato Sicoob aqui</div><div class="small">Só usado se a caixa acima estiver marcada</div><input type="file" id="extratoFile" accept="application/pdf"></div>
     </div>
     <div class="btn-row"><button class="btn" id="processBaixaBtn" disabled onclick="processarBaixa()">Processar</button></div>
     <div id="baixaStatus" class="status-line hidden"></div>
@@ -835,8 +838,19 @@ async function parseRelatorioLiquidacao(file){
   const ws = wb.Sheets[wb.SheetNames[0]];
   const aoa = XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:null});
   const rows = [];
+  // O grupo "82-BAIXA - PEDIDO CEDENTE" é o próprio cliente pedindo pra tirar o título
+  // da carteira de cobrança (renegociação, boleto cancelado etc.) — NÃO é dinheiro
+  // recebido, confirmado pelo usuário depois de gerar uma baixa errada com isso. Cada
+  // grupo tem uma linha de cabeçalho só com o nome do grupo na coluna B (ex. "82-Baixa
+  // Pedido Cedente"), que vale até o próximo cabeçalho de grupo — pula os dados desse.
+  let grupoAtual = "";
   aoa.forEach(r=>{
     if(!r) return;
+    if((r[0]===null || r[0]==="") && typeof r[1]==="string" && /^\d+\s*-/.test(r[1].trim())){
+      grupoAtual = normalizeText(r[1]);
+      return;
+    }
+    if(grupoAtual.includes("BAIXA - PEDIDO CEDENTE")) return;
     const sacado=r[1], seuNum=r[11], vencimento=r[18], valor=r[25], vlrMora=r[28], vlrDesc=r[29], vlrAcresc=r[31], dtLiq=r[34], vlrCobrado=r[35];
     if(typeof sacado !== "string" || !sacado.trim()) return;
     if(typeof seuNum !== "string") return;
@@ -902,11 +916,17 @@ function findBestMatch(nome, db){
   });
   return bestScore>0 ? {documento:bestKey, nome:best.razao_social} : null;
 }
+// "confiavel:true" = achado pelo código do cliente/fornecedor vinculado à empresa (link
+// exato). "confiavel:false" = achado só por nome parecido (findBestMatch) — pode errar
+// quando duas empresas têm nome parecido ou quando o nome é curto/genérico (já aconteceu:
+// "RR Industria..." casou com uma empresa completamente diferente). Quem chama isso deve
+// sinalizar visualmente as linhas não confiáveis em vez de mostrar como "OK" igual às outras.
 function resolverCnpj(empresaCnpj, tipoTitulo, codigo, nomeRelatorio){
   const chave = `${empresaCnpj}_${tipoTitulo}_${codigo}`;
   const doc = codigoIndex[chave];
-  if(doc && clientesDB[doc]) return {documento: doc, nome: clientesDB[doc].razao_social};
-  return findBestMatch(nomeRelatorio, clientesDB);
+  if(doc && clientesDB[doc]) return {documento: doc, nome: clientesDB[doc].razao_social, confiavel:true};
+  const m = findBestMatch(nomeRelatorio, clientesDB);
+  return m ? {...m, confiavel:false} : null;
 }
 
 /* ---- Fluxo principal ---- */
@@ -955,13 +975,20 @@ wireDropzone("extratoDrop","extratoFile", async (f,d)=>{
   }
   checkReadyBaixa();
 });
-function checkReadyBaixa(){ document.getElementById("processBaixaBtn").disabled = !(contasState && (extratoState || liquidacaoState)); }
+const extratoFallbackCheckbox = document.getElementById("usarExtratoFallback");
+extratoFallbackCheckbox.addEventListener("change", ()=>{
+  document.getElementById("extratoDrop").classList.toggle("hidden", !extratoFallbackCheckbox.checked);
+  checkReadyBaixa();
+});
+function checkReadyBaixa(){ document.getElementById("processBaixaBtn").disabled = !(contasState && (liquidacaoState || (extratoFallbackCheckbox.checked && extratoState))); }
 
 // Processa em duas passadas: 1ª pelo relatório de liquidação (direto pela NF, mais
-// preciso), 2ª pelo extrato (soma exata numa janela) só nos títulos que sobrarem —
-// assim cada título só aparece uma vez no resultado, casado pela fonte mais confiável
-// disponível.
+// preciso), 2ª pelo extrato (soma exata numa janela) só nos títulos que sobrarem — e só
+// se o usuário marcou explicitamente a caixa de usar o extrato como reforço, porque essa
+// fonte não tem nome do pagador e já produziu baixas de notas inexistentes ao combinar
+// valores de clientes diferentes por coincidência de soma.
 function processarBaixa(){
+  const usarExtrato = extratoFallbackCheckbox.checked && extratoState;
   let abertos = contasState.titulos.filter(t=> /^ABERT|^PARCIAL/.test(normalizeText(t.situacao))).map(a=>({...a}));
   const rows = [];
   let semExtratoLumps = [];
@@ -971,28 +998,29 @@ function processarBaixa(){
     matched.forEach(({lr, titulo})=> rows.push(buildBaixaRowLiquidacao(lr, titulo)));
     abertos = naoResolvidos;
   }
-  if(extratoState){
-    const {results, wideResolved, unmatchedLumpIdx, unmatchedAbertos} = matchAllBaixas(extratoState, abertos);
+  if(usarExtrato){
+    const {results, unmatchedLumpIdx, unmatchedAbertos} = matchAllBaixas(extratoState, abertos);
     const order = Object.keys(results).map(Number).sort((a,b)=> partsToDate(extratoState[a].data)-partsToDate(extratoState[b].data));
+    // Sempre "warn" (nunca "OK" liso) — o extrato não tem nome do pagador, então mesmo um
+    // casamento "exato" pode ter juntado títulos do cliente errado por coincidência de soma.
     order.forEach(idx=>{
-      const isWide = wideResolved.has(idx);
       results[idx].forEach(a=>{
-        rows.push(buildBaixaRow(a, extratoState[idx].data, isWide ? "warn" : null, isWide ? "Conciliado (janela larga, conferir)" : "OK (via extrato)"));
+        rows.push(buildBaixaRow(a, extratoState[idx].data, "warn", "Via extrato — SEM nome do pagador, confira com atenção antes de exportar"));
       });
     });
     abertos = unmatchedAbertos;
     semExtratoLumps = unmatchedLumpIdx.map(i=>extratoState[i]);
   }
   abertos.sort((a,b)=> partsToDate(a.vencimento)-partsToDate(b.vencimento)).forEach(a=>{
-    rows.push(buildBaixaRow(a, null, "err", liquidacaoState||extratoState ? "Sem correspondência nas fontes carregadas" : "Nenhuma fonte de pagamento carregada"));
+    rows.push(buildBaixaRow(a, null, "err", liquidacaoState||usarExtrato ? "Sem correspondência nas fontes carregadas" : "Nenhuma fonte de pagamento carregada"));
   });
   rowsState = rows;
   renderBaixaResult(rows, semExtratoLumps, contasState.empresaNome, contasState.empresaCnpj);
 }
 function buildBaixaRow(titulo, dataBaixa, statusClass, statusText){
   const cnpjInfo = resolverCnpj(contasState.empresaCnpj, "cliente", titulo.codigo, titulo.nome);
-  const cls = cnpjInfo ? statusClass : "err";
-  const txt = cnpjInfo ? statusText : "CNPJ não encontrado no cadastro";
+  const cls = !cnpjInfo ? "err" : (cnpjInfo.confiavel ? statusClass : "warn");
+  const txt = !cnpjInfo ? "CNPJ não encontrado no cadastro" : (cnpjInfo.confiavel ? statusText : `${statusText} — CNPJ por nome aproximado, confira`);
   return {
     numero: titulo.documento, cnpj: cnpjInfo ? cnpjInfo.documento : "", nome: cnpjInfo ? cnpjInfo.nome : titulo.nome,
     vencimento: titulo.vencimento, databaixa: dataBaixa, valor: saldoOuParcela(titulo),
@@ -1002,15 +1030,15 @@ function buildBaixaRow(titulo, dataBaixa, statusClass, statusText){
 }
 function buildBaixaRowLiquidacao(lr, titulo){
   const cnpjInfo = resolverCnpj(contasState.empresaCnpj, "cliente", titulo.codigo, titulo.nome);
-  const cls = cnpjInfo ? null : "err";
-  const txt = cnpjInfo ? "OK (via relatório de liquidação)" : "CNPJ não encontrado no cadastro";
+  const cls = !cnpjInfo ? "err" : (cnpjInfo.confiavel ? null : "warn");
+  const txt = !cnpjInfo ? "CNPJ não encontrado no cadastro" : (cnpjInfo.confiavel ? "OK (via relatório de liquidação)" : "CNPJ por nome aproximado, confira — via relatório de liquidação");
   return {
     numero: titulo.documento, cnpj: cnpjInfo ? cnpjInfo.documento : "", nome: cnpjInfo ? cnpjInfo.nome : titulo.nome,
-    vencimento: titulo.vencimento, databaixa: lr.dataBaixa, valor: saldoOuParcela(titulo),
-    // "Vlr. Outros Acresc." do relatório não tem coluna própria no layout de baixa do
-    // Domínio — mapeado como multa por ser o mais próximo semanticamente (acréscimo
-    // além da mora), mas confira se essa empresa usa esse campo pra outra coisa.
-    juros: lr.vlrMora||0, multa: lr.vlrAcresc||0, desconto: lr.vlrDesc||0, pis:0,cofins:0,csll:0,irrf:0,
+    // "Valor Recebido" precisa ser o valor efetivamente creditado (Vlr. Cobrado, já com
+    // mora/desconto/acréscimos aplicados) — usar o valor nominal da parcela e reportar a
+    // mora à parte já causou uma baixa com saldo errado num caso real (parcela com juros).
+    vencimento: titulo.vencimento, databaixa: lr.dataBaixa, valor: lr.valorCobrado,
+    juros:0, multa:0, desconto:0, pis:0, cofins:0, csll:0, irrf:0,
     statusClass: cls, statusText: txt, codigo: titulo.codigo,
   };
 }
@@ -1219,8 +1247,8 @@ function processarEntradas(){
 }
 function buildEntradaRow(titulo, dataBaixa, statusClass, statusText){
   const cnpjInfo = resolverCnpj(contasPagarState.empresaCnpj, "fornecedor", titulo.codigo, titulo.nome);
-  const cls = cnpjInfo ? statusClass : "err";
-  const txt = cnpjInfo ? statusText : "CNPJ não encontrado no cadastro";
+  const cls = !cnpjInfo ? "err" : (cnpjInfo.confiavel ? statusClass : "warn");
+  const txt = !cnpjInfo ? "CNPJ não encontrado no cadastro" : (cnpjInfo.confiavel ? statusText : `${statusText} — CNPJ por nome aproximado, confira`);
   return {
     numero: titulo.documento, cnpj: cnpjInfo ? cnpjInfo.documento : "", nome: cnpjInfo ? cnpjInfo.nome : titulo.nome,
     vencimento: titulo.vencimento, databaixa: dataBaixa, valor: saldoOuParcela(titulo),
