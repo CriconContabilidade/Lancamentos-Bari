@@ -84,6 +84,9 @@ input[type=file]{display:none;}
 
 table.preview{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;}
 table.preview th{text-align:left;padding:7px 8px;border-bottom:1.5px solid var(--rule-strong);font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.03em;color:var(--ink-soft);position:sticky;top:0;background:var(--paper-raised);white-space:nowrap;}
+table.preview th.sortable{cursor:pointer;user-select:none;}
+table.preview th.sortable:hover{color:var(--ink);}
+table.preview th.sortable .arrow{color:var(--accent);}
 .table-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}
 .table-toolbar input[type=search]{flex:1;max-width:320px;padding:7px 9px;border:1.5px solid var(--rule-strong);border-radius:4px;font-size:13px;font-family:'IBM Plex Sans',sans-serif;background:var(--paper-raised);color:var(--ink);}
 .table-toolbar input[type=search]:focus{outline:none;border-color:var(--ink);}
@@ -1026,6 +1029,10 @@ function buildBaixaRow(titulo, dataBaixa, statusClass, statusText){
     vencimento: titulo.vencimento, databaixa: dataBaixa, valor: saldoOuParcela(titulo),
     juros:0, multa:0, desconto:0, pis:0, cofins:0, csll:0, irrf:0,
     statusClass: cls, statusText: txt, codigo: titulo.codigo,
+    // Só entra no arquivo exportado quando representa um recebimento real (título casado
+    // com pagamento) — "Pendente"/sem CNPJ começam desmarcadas, pois não é uma baixa de
+    // verdade ainda; o usuário pode marcar manualmente se tiver certeza.
+    incluir: cls !== "err",
   };
 }
 function buildBaixaRowLiquidacao(lr, titulo){
@@ -1040,28 +1047,77 @@ function buildBaixaRowLiquidacao(lr, titulo){
     vencimento: titulo.vencimento, databaixa: lr.dataBaixa, valor: lr.valorCobrado,
     juros:0, multa:0, desconto:0, pis:0, cofins:0, csll:0, irrf:0,
     statusClass: cls, statusText: txt, codigo: titulo.codigo,
+    incluir: cls !== "err",
   };
 }
+/* ---- Ordenação/filtro genérico das tabelas de revisão (Baixas de Serviços e Entradas) ---- */
+function makeTableState(){ return {filter:"", sortCol:null, sortDir:1}; }
+function sortValue(v){ return v && typeof v==="object" && "y" in v ? partsToDate(v).getTime() : v; }
+function filterSortRows(rows, state, getSearchable){
+  let indexed = rows.map((row,idx)=>({row, idx}));
+  const needle = normalizeText((state.filter||"").trim());
+  if(needle) indexed = indexed.filter(({row})=> getSearchable(row).some(v=>normalizeText(String(v??"")).includes(needle)));
+  if(state.sortCol){
+    indexed.sort((a,b)=>{
+      const va = sortValue(a.row[state.sortCol]), vb = sortValue(b.row[state.sortCol]);
+      if(va==null && vb==null) return 0;
+      if(va==null) return 1;
+      if(vb==null) return -1;
+      if(typeof va === "number" && typeof vb === "number") return (va-vb)*state.sortDir;
+      return String(va).localeCompare(String(vb), "pt-BR", {numeric:true})*state.sortDir;
+    });
+  }
+  return indexed;
+}
+function toggleSort(state, col, rerenderFn){
+  if(state.sortCol===col){ state.sortDir *= -1; } else { state.sortCol = col; state.sortDir = 1; }
+  rerenderFn();
+}
+function sortTh(stateVarName, state, col, label, rerenderFnName){
+  const arrow = state.sortCol===col ? `<span class="arrow">${state.sortDir===1?"▲":"▼"}</span>` : "";
+  return `<th class="sortable" onclick="toggleSort(${stateVarName},'${col}',${rerenderFnName})">${label} ${arrow}</th>`;
+}
+
+let baixaTableState = makeTableState();
+let semExtratoLumpsState = [], empresaNomeState = "", empresaCnpjState = "";
 function renderBaixaResult(rows, semExtrato, empresaNome, empresaCnpj){
+  document.getElementById("resultBaixaCard").classList.remove("hidden");
+  baixaTableState = makeTableState();
+  semExtratoLumpsState = semExtrato; empresaNomeState = empresaNome; empresaCnpjState = empresaCnpj;
+  renderBaixaTable();
+}
+function renderBaixaTable(){
   const box = document.getElementById("resultBaixaCard");
-  box.classList.remove("hidden");
+  const rows = rowsState, semExtrato = semExtratoLumpsState, empresaNome = empresaNomeState, empresaCnpj = empresaCnpjState;
   const nOk = rows.filter(r=>!r.statusClass).length;
   const nWarn = rows.filter(r=>r.statusClass==="warn").length;
   const nErr = rows.filter(r=>r.statusClass==="err").length;
+  const nIncl = rows.filter(r=>r.incluir).length;
+  const indexed = filterSortRows(rows, baixaTableState, r=>[r.numero,r.nome,r.cnpj]);
   let html = `<div class="section-title">${empresaNome} — baixa_ser.txt</div>
   <div class="summary-row">
     <div class="item"><div class="k">Linhas</div><div class="v">${rows.length}</div></div>
+    <div class="item"><div class="k">Vão pro arquivo</div><div class="v">${nIncl}</div></div>
     <div class="item"><div class="k">OK</div><div class="v">${nOk}</div></div>
     <div class="item"><div class="k">Conferir</div><div class="v">${nWarn}</div></div>
     <div class="item"><div class="k">Pendente</div><div class="v">${nErr}</div></div>
     <div class="item"><div class="k">Extrato sem título</div><div class="v">${semExtrato.length}</div></div>
   </div>
-  <div class="help">Revise as linhas marcadas antes de baixar — campos são editáveis. Vermelho = falta CNPJ ou não achou o título no extrato; amarelo = casou mas com intervalo grande entre vencimento e crédito (conferir).</div>
+  <div class="help">Revise as linhas marcadas antes de baixar — campos são editáveis. Vermelho = falta CNPJ ou não achou o título; amarelo = confira (CNPJ por nome aproximado, ou via extrato). Desmarque a caixa pra excluir uma linha do arquivo exportado — linhas "Pendente" já começam desmarcadas, porque não representam um recebimento real.</div>
+  <div class="table-toolbar"><input type="search" value="${baixaTableState.filter}" placeholder="Filtrar por nº nota, nome ou CNPJ..." oninput="baixaTableState.filter=this.value; renderBaixaTable();"><span class="count">${indexed.length===rows.length?`${rows.length} linha(s)`:`${indexed.length} de ${rows.length}`}</span></div>
   <div class="table-wrap"><table class="preview"><thead><tr>
-    <th>Nº Nota</th><th>CNPJ/CPF</th><th>Nome</th><th>Vencimento</th><th>Data Baixa</th><th>Valor Recebido</th><th>Juros</th><th>Multa</th><th>Desconto</th><th>PIS</th><th>COFINS</th><th>CSLL</th><th>IRRF</th><th>Status</th>
+    <th></th>
+    ${sortTh('baixaTableState',baixaTableState,'numero','Nº Nota','renderBaixaTable')}
+    ${sortTh('baixaTableState',baixaTableState,'cnpj','CNPJ/CPF','renderBaixaTable')}
+    ${sortTh('baixaTableState',baixaTableState,'nome','Nome','renderBaixaTable')}
+    ${sortTh('baixaTableState',baixaTableState,'vencimento','Vencimento','renderBaixaTable')}
+    ${sortTh('baixaTableState',baixaTableState,'databaixa','Data Baixa','renderBaixaTable')}
+    ${sortTh('baixaTableState',baixaTableState,'valor','Valor Recebido','renderBaixaTable')}
+    <th>Juros</th><th>Multa</th><th>Desconto</th><th>PIS</th><th>COFINS</th><th>CSLL</th><th>IRRF</th><th>Status</th>
   </tr></thead><tbody>`;
-  rows.forEach((r,i)=>{
-    html += `<tr class="${r.statusClass||''}">
+  indexed.forEach(({row:r, idx:i})=>{
+    html += `<tr class="${r.statusClass||''} ${r.incluir?'':'excluded'}">
+      <td class="cell" style="text-align:center"><input type="checkbox" ${r.incluir?'checked':''} onchange="updateBaixaRow(${i},'incluir',this.checked)"></td>
       <td class="cell"><input class="cell-input" value="${r.numero}" onchange="updateBaixaRow(${i},'numero',this.value)"></td>
       <td class="cell"><input class="cell-input wide" value="${r.cnpj}" onchange="updateBaixaRow(${i},'cnpj',this.value)"></td>
       <td>${r.nome||""}</td>
@@ -1090,13 +1146,14 @@ function renderBaixaResult(rows, semExtrato, empresaNome, empresaCnpj){
 }
 function updateBaixaRow(i, field, val){
   const r = rowsState[i];
+  if(field==="incluir"){ r.incluir = val; return; }
   if(field==="vencimento" || field==="databaixa"){ r[field] = brParts(val) || null; }
   else if(["valor","juros","multa","desconto","pis","cofins","csll","irrf"].includes(field)){ const n=parseBRL(val); if(n!=null) r[field]=n; }
   else { r[field]=val; }
   if(field==="cnpj"){
     const cl = classifyDocumento(val);
     r.statusClass = cl.valido ? (r.statusClass==="warn"?"warn":null) : "err";
-    r.statusText = cl.valido ? (r.statusText.includes("larga")?r.statusText:"OK") : "CNPJ/CPF inválido";
+    r.statusText = cl.valido ? (r.statusText.includes("aproximado")||r.statusText.includes("via extrato")?r.statusText:"OK") : "CNPJ/CPF inválido";
   }
 }
 function baixaRowArray(r){
@@ -1104,14 +1161,16 @@ function baixaRowArray(r){
 }
 function downloadBaixaXlsx(){
   const header = ["Número da Nota","CPF/CNPJ do Cliente","Data de Vencimento da Parcela","Data da Baixa da Parcela","Valor Recebido","Valor Juros","Valor Multa","Valor Desconto","Valor PIS","Valor COFINS","Valor CSLL","Valor IRRF"];
-  downloadXlsx("baixa_servicos.xlsx", [header, ...rowsState.map(baixaRowArray)], "Baixa");
+  const rows = rowsState.filter(r=>r.incluir);
+  downloadXlsx("baixa_servicos.xlsx", [header, ...rows.map(baixaRowArray)], "Baixa");
 }
 function downloadBaixaTxt(){
-  const naoValidas = rowsState.filter(r=>{ const c=classifyDocumento(r.cnpj); return !c.valido; });
+  const rows = rowsState.filter(r=>r.incluir);
+  const naoValidas = rows.filter(r=>{ const c=classifyDocumento(r.cnpj); return !c.valido; });
   if(naoValidas.length){
-    if(!confirm(`${naoValidas.length} linha(s) ainda têm CNPJ/CPF ausente ou inválido. Gerar mesmo assim (essas linhas provavelmente serão rejeitadas pelo Domínio)?`)) return;
+    if(!confirm(`${naoValidas.length} linha(s) marcada(s) pra exportar ainda têm CNPJ/CPF ausente ou inválido. Gerar mesmo assim (essas linhas provavelmente serão rejeitadas pelo Domínio)?`)) return;
   }
-  const lines = rowsState.map(r=> baixaRowArray(r).map((v,i)=> i>=4 ? fmtValorTxt(v) : v).join(";"));
+  const lines = rows.map(r=> baixaRowArray(r).map((v,i)=> i>=4 ? fmtValorTxt(v) : v).join(";"));
   downloadText("baixa_ser.txt", lines.join("\r\n") + "\r\n");
 }
 
@@ -1253,35 +1312,56 @@ function buildEntradaRow(titulo, dataBaixa, statusClass, statusText){
     numero: titulo.documento, cnpj: cnpjInfo ? cnpjInfo.documento : "", nome: cnpjInfo ? cnpjInfo.nome : titulo.nome,
     vencimento: titulo.vencimento, databaixa: dataBaixa, valor: saldoOuParcela(titulo),
     juros:0, multa:0, desconto:0, statusClass: cls, statusText: txt, codigo: titulo.codigo,
+    incluir: cls !== "err",
   };
 }
-// Linha "pendente" — débito do extrato sem título casado; sem número de nota nem CNPJ
-// pra preencher sozinho, fica marcada em vermelho pro usuário completar à mão.
+// Linha "pendente" — débito do extrato sem título casado, sem número de nota nenhum (não
+// tem o que exportar) — sempre começa desmarcada, o usuário preenche à mão se identificar.
 function buildEntradaRowPendente(lump, nomeForn, statusClass, statusText){
   return {
     numero: "", cnpj: "", nome: nomeForn || lump.nomeFrag || lump.historico,
     vencimento: null, databaixa: lump.data, valor: lump.valor,
-    juros:0, multa:0, desconto:0, statusClass, statusText,
+    juros:0, multa:0, desconto:0, statusClass, statusText, incluir:false,
   };
 }
+let entradasTableState = makeTableState();
+let semNomeEntradasState = [], empresaNomeEntradasState = "", empresaCnpjEntradasState = "";
 function renderEntradasResult(rows, semNome, empresaNome, empresaCnpj){
+  document.getElementById("resultEntradasCard").classList.remove("hidden");
+  entradasTableState = makeTableState();
+  semNomeEntradasState = semNome; empresaNomeEntradasState = empresaNome; empresaCnpjEntradasState = empresaCnpj;
+  renderEntradasTable();
+}
+function renderEntradasTable(){
   const box = document.getElementById("resultEntradasCard");
-  box.classList.remove("hidden");
+  const rows = entradasRowsState, semNome = semNomeEntradasState, empresaNome = empresaNomeEntradasState, empresaCnpj = empresaCnpjEntradasState;
   const nOk = rows.filter(r=>!r.statusClass).length;
   const nErr = rows.filter(r=>r.statusClass==="err").length;
+  const nIncl = rows.filter(r=>r.incluir).length;
+  const indexed = filterSortRows(rows, entradasTableState, r=>[r.numero,r.nome,r.cnpj]);
   let html = `<div class="section-title">${empresaNome} — baixa_ent.txt</div>
   <div class="summary-row">
     <div class="item"><div class="k">Linhas</div><div class="v">${rows.length}</div></div>
+    <div class="item"><div class="k">Vão pro arquivo</div><div class="v">${nIncl}</div></div>
     <div class="item"><div class="k">OK</div><div class="v">${nOk}</div></div>
     <div class="item"><div class="k">Pendente</div><div class="v">${nErr}</div></div>
     <div class="item"><div class="k">Débitos sem nome no extrato</div><div class="v">${semNome.length}</div></div>
   </div>
-  <div class="help">Vermelho = fornecedor não identificado ou nenhum título aberto bate com o valor — preencha nº da nota e CNPJ à mão, ou edite o valor se for baixa parcial via cartão. Campos são editáveis.</div>
+  <div class="help">Vermelho = fornecedor não identificado ou nenhum título aberto bate com o valor. Amarelo = CNPJ por nome aproximado, confira. Desmarque a caixa pra excluir uma linha do arquivo — linhas "Pendente" já começam desmarcadas, e sem nº de documento não tem como ir pro arquivo mesmo. Campos são editáveis.</div>
+  <div class="table-toolbar"><input type="search" value="${entradasTableState.filter}" placeholder="Filtrar por nº documento, nome ou CNPJ..." oninput="entradasTableState.filter=this.value; renderEntradasTable();"><span class="count">${indexed.length===rows.length?`${rows.length} linha(s)`:`${indexed.length} de ${rows.length}`}</span></div>
   <div class="table-wrap"><table class="preview"><thead><tr>
-    <th>Nº Documento</th><th>CNPJ/CPF</th><th>Nome</th><th>Vencimento</th><th>Data Baixa</th><th>Valor Pago</th><th>Juros</th><th>Multa</th><th>Desconto</th><th>Status</th>
+    <th></th>
+    ${sortTh('entradasTableState',entradasTableState,'numero','Nº Documento','renderEntradasTable')}
+    ${sortTh('entradasTableState',entradasTableState,'cnpj','CNPJ/CPF','renderEntradasTable')}
+    ${sortTh('entradasTableState',entradasTableState,'nome','Nome','renderEntradasTable')}
+    ${sortTh('entradasTableState',entradasTableState,'vencimento','Vencimento','renderEntradasTable')}
+    ${sortTh('entradasTableState',entradasTableState,'databaixa','Data Baixa','renderEntradasTable')}
+    ${sortTh('entradasTableState',entradasTableState,'valor','Valor Pago','renderEntradasTable')}
+    <th>Juros</th><th>Multa</th><th>Desconto</th><th>Status</th>
   </tr></thead><tbody>`;
-  rows.forEach((r,i)=>{
-    html += `<tr class="${r.statusClass||''}">
+  indexed.forEach(({row:r, idx:i})=>{
+    html += `<tr class="${r.statusClass||''} ${r.incluir?'':'excluded'}">
+      <td class="cell" style="text-align:center"><input type="checkbox" ${r.incluir?'checked':''} ${r.numero?'':'disabled title="Sem nº de documento — não pode ir pro arquivo"'} onchange="updateEntradaRow(${i},'incluir',this.checked)"></td>
       <td class="cell"><input class="cell-input" value="${r.numero}" onchange="updateEntradaRow(${i},'numero',this.value)"></td>
       <td class="cell"><input class="cell-input wide" value="${r.cnpj}" onchange="updateEntradaRow(${i},'cnpj',this.value)"></td>
       <td>${r.nome||""}</td>
@@ -1306,9 +1386,11 @@ function renderEntradasResult(rows, semNome, empresaNome, empresaCnpj){
 }
 function updateEntradaRow(i, field, val){
   const r = entradasRowsState[i];
+  if(field==="incluir"){ r.incluir = val && !!r.numero; return; }
   if(field==="vencimento" || field==="databaixa"){ r[field] = brParts(val) || null; }
   else if(["valor","juros","multa","desconto"].includes(field)){ const n=parseBRL(val); if(n!=null) r[field]=n; }
   else { r[field]=val; }
+  if(field==="numero" && val && !r.incluir && r.statusClass!=="err"){ r.incluir = true; }
   if(field==="cnpj"){
     const cl = classifyDocumento(val);
     r.statusClass = cl.valido ? null : "err";
@@ -1320,14 +1402,16 @@ function entradaRowArray(r){
 }
 function downloadEntradasXlsx(){
   const header = ["Número da Nota","CPF/CNPJ do Fornecedor","Data de Vencimento da Parcela","Data da Baixa da Parcela","Valor Pago","Valor Juros","Valor Multa","Valor Desconto"];
-  downloadXlsx("baixa_entradas.xlsx", [header, ...entradasRowsState.map(entradaRowArray)], "Baixa");
+  const rows = entradasRowsState.filter(r=>r.incluir);
+  downloadXlsx("baixa_entradas.xlsx", [header, ...rows.map(entradaRowArray)], "Baixa");
 }
 function downloadEntradasTxt(){
-  const pendentes = entradasRowsState.filter(r=> !r.numero || !classifyDocumento(r.cnpj).valido);
+  const rows = entradasRowsState.filter(r=>r.incluir);
+  const pendentes = rows.filter(r=> !r.numero || !classifyDocumento(r.cnpj).valido);
   if(pendentes.length){
-    if(!confirm(`${pendentes.length} linha(s) ainda sem nº de documento e/ou CNPJ/CPF válido. Gerar mesmo assim (essas linhas provavelmente serão rejeitadas pelo Domínio)?`)) return;
+    if(!confirm(`${pendentes.length} linha(s) marcada(s) pra exportar ainda sem nº de documento e/ou CNPJ/CPF válido. Gerar mesmo assim (essas linhas provavelmente serão rejeitadas pelo Domínio)?`)) return;
   }
-  const lines = entradasRowsState.map(r=> entradaRowArray(r).map((v,i)=> i>=4 ? fmtValorTxt(v) : v).join(";"));
+  const lines = rows.map(r=> entradaRowArray(r).map((v,i)=> i>=4 ? fmtValorTxt(v) : v).join(";"));
   downloadText("baixa_ent.txt", lines.join("\r\n") + "\r\n");
 }
 
