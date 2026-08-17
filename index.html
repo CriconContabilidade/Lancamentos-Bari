@@ -1627,6 +1627,12 @@ const PADROES_SEED = [
   {keywords:["TARIFA COBRANÇA"], debito:384, credito:20, hist:"PAGAMENTO REF. TARIFA BANCARIA POR EMISSÃO DE BOLETO", ignorar:false},
   {keywords:["DÉB.SEGURO EMPRÉSTIMO"], debito:355, credito:20, hist:"PAGAMENTO REF. SEGURO DE EMPRÉSTIMO", ignorar:false},
   {keywords:["DÉB.IOF"], debito:385, credito:20, hist:"PAGAMENTO REF. IOF", ignorar:false},
+  {keywords:["JUROS CONTA GARANTIDA"], debito:384, credito:20, hist:"PAGAMENTO REF. JUROS DE CONTA GARANTIDA SICOOB", ignorar:false},
+  {keywords:["DÉB.SEGURO PRESTAMISTA"], debito:355, credito:20, hist:"PAGAMENTO REF. SEGURO PRESTAMISTA", ignorar:false},
+  {keywords:["DÉBITO PACOTE SERVIÇOS"], debito:384, credito:20, hist:"PAGAMENTO REF. PACOTE DE SERVIÇOS BANCÁRIOS SICOOB", ignorar:false},
+  // Fatura do cartão — o histórico cita o mês DA FATURA, que é sempre o mês anterior ao do
+  // pagamento (paga em agosto = fatura de julho), por isso usa histFn em vez de hist fixo.
+  {keywords:["VIS DÉB.CONV.DEMAIS EMPRESAS","DÉB.CONV.DEMAIS EMPRESAS"], debito:627, credito:20, histFn:"faturaCartao", ignorar:false},
   {keywords:["CRÉD.LIQUIDAÇÃO COBRANÇA"], debito:null, credito:null, hist:"", ignorar:true},
   {keywords:["DÉB.CONV.TRIBUTOS FEDERAIS"], debito:null, credito:null, hist:"", ignorar:true},
   {keywords:["DÉB.TIT.COMPE EFETIVADO"], debito:null, credito:null, hist:"", ignorar:true},
@@ -1873,6 +1879,18 @@ function matchIgnorarOuPadrao(historico, nomeFrag){
   }
   return null;
 }
+// Padrões com histórico calculado (não fixo) em vez de "hist" — referenciados por nome via
+// o campo "histFn" do padrão, pra poder ficar salvo/editado como JSON sem perder a função.
+const HIST_FUNCOES = {
+  // Fatura do cartão de crédito: o mês citado é sempre o mês ANTERIOR ao da transação
+  // (paga em agosto = fatura de julho).
+  faturaCartao(l){
+    let mm = l.data.m - 1, yy = l.data.y;
+    if(mm < 1){ mm = 12; yy -= 1; }
+    return `PAGAMENTO REF. FATURA DO CARTÃO DE CRÉDITO SICOOB ${String(mm).padStart(2,"0")}/${yy}`;
+  },
+};
+function resolveHist(p, l){ return p.histFn ? (HIST_FUNCOES[p.histFn] ? HIST_FUNCOES[p.histFn](l) : null) : p.hist; }
 function buildEmprestimoEntries(emp, linha){
   const parcela = emp.ultimaParcela + 1;
   const hist = `PAGAMENTO REF. PARC ${String(parcela).padStart(2,"0")}/${emp.totalParcelas} - EMPRESTIMO BANCO SICOOB - Nº DO CONTRATO: ${emp.contrato}`;
@@ -1980,7 +1998,8 @@ function processarLancamentos(){
       // o crédito 411, deixa o banco preencher o débito) é tão "OK" quanto um com os dois
       // lados fixos; só falta completar de verdade quando nenhum lado ficou definido.
       const matched = d!=null && c!=null;
-      rows.push({data:l.data, debito:d, credito:c, valor:l.valor, hist:p.hist||null, complemento: p.hist?null:l.historico, iniciaLote:1, flag:!matched, statusText: matched?"OK (padrão cadastrado)":"Padrão parcial — só a conta banco foi preenchida"});
+      const hist = resolveHist(p, l);
+      rows.push({data:l.data, debito:d, credito:c, valor:l.valor, hist:hist||null, complemento: hist?null:l.historico, iniciaLote:1, flag:!matched, statusText: matched?"OK (padrão cadastrado)":"Padrão parcial — só a conta banco foi preenchida"});
       // companion: lançamento extra, sempre acoplado, que não mexe no banco — mesma data/valor
       if(p.companion){
         rows.push({data:l.data, debito:p.companion.debito??null, credito:p.companion.credito??null, valor:l.valor, hist:p.companion.hist||null, complemento:null, iniciaLote:1, flag:false, statusText:"OK (lançamento automático — sempre acompanha o padrão acima)"});
