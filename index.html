@@ -1646,6 +1646,10 @@ const PADROES_SEED = [
   // sem tocar o banco — não é opcional, sempre acompanha esse padrão.
   {keywords:["REM.: CRISTIANO PACHECO BUSSOLO"], debito:null, credito:411, hist:"PAGAMENTO REF. LUCROS DISTRIBUIDOS AO SÓCIO CRISTIANO PACHECO BUSSOLO", ignorar:false,
     companion:{debito:262, credito:411, hist:"VALOR REF. LUCROS A DISTRIBUIR AO SÓCIO CRISTIANO PACHECO BUSSOLO"}},
+  // Recebimento de cliente via Pix — já vira baixa de serviços na outra função; fica DEPOIS do
+  // padrão da Ferrara de propósito, porque um Pix recebido dela (empréstimo devolvido) tem que
+  // cair no padrão direcional acima, não aqui.
+  {keywords:["PIX RECEBIDO - OUTRA IF"], debito:null, credito:null, hist:"", ignorar:true},
 ];
 function loadPadroes(){ const raw = localStorage.getItem("bari_lancamentos_padroes"); return raw ? JSON.parse(raw) : PADROES_SEED.map(p=>({...p})); }
 function savePadroes(list){ localStorage.setItem("bari_lancamentos_padroes", JSON.stringify(list)); }
@@ -1724,6 +1728,11 @@ const EMPRESTIMOS_SEED = [
       {conta:625, lado:"D", tipo:"fixo", valor:4998.13},
       {conta:20,  lado:"C", tipo:"banco"},
       {conta:588, lado:"C", tipo:"fixo", valor:784.95},
+      {conta:382, lado:"D", tipo:"diferenca"},
+  ]},
+  { contrato:"1365388", totalParcelas:37, ultimaParcela:34, pernas:[
+      {conta:75,  lado:"D", tipo:"fixo", valor:4054.05},
+      {conta:20,  lado:"C", tipo:"banco"},
       {conta:382, lado:"D", tipo:"diferenca"},
   ]},
 ];
