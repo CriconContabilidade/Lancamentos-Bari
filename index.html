@@ -285,6 +285,22 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
     </div>
   </div>
 
+  <!-- ===================== CADASTRO: LOTEAMENTOS ===================== -->
+  <div class="card">
+    <div class="section-title">Cadastro — Loteamentos/Parcelamentos (linhas idênticas)</div>
+    <div class="help">Pra pagamentos que aparecem no extrato como linhas <b>idênticas</b> quando há mais de uma parcela do mesmo tipo no mês (mesmo histórico, mesmo valor, mesmo favorecido — ex. duas parcelas J.S Administração, lotes diferentes) — nada no extrato diferencia qual é qual, então a ordem de aparição decide: a 1ª ocorrência usa a 1ª configuração da lista "Ordem", a 2ª usa a 2ª, e assim por diante. Use "Editar via JSON" pra adicionar um novo grupo ou corrigir a ordem/contas.</div>
+    <div class="table-wrap"><table class="preview" id="loteamentosTable"></table></div>
+    <div class="btn-row">
+      <button class="btn ghost" onclick="toggleLoteamentosJson()">Editar via JSON</button>
+      <button class="btn ghost" onclick="exportJson('bari_loteamentos_export','loteamentos.json')">Exportar JSON</button>
+    </div>
+    <div id="loteamentosJsonBox" class="hidden" style="margin-top:10px;">
+      <textarea id="loteamentosJsonArea" style="width:100%;min-height:180px;font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px;border:1.5px solid var(--rule-strong);border-radius:4px;"></textarea>
+      <div class="btn-row"><button class="btn small" onclick="salvarLoteamentosJson()">Salvar</button></div>
+      <div id="loteamentosJsonStatus" class="status-line hidden"></div>
+    </div>
+  </div>
+
   <footer>Lançamentos Bari · Cricon Contabilidade — uso interno</footer>
 </div>
 
@@ -1735,6 +1751,62 @@ function salvarEmprestimosJson(){
   }catch(err){ status.classList.add("err"); status.textContent = "JSON inválido: " + err.message; }
 }
 
+/* ---- Cadastro: Loteamentos/parcelamentos com linhas idênticas no extrato ----
+   Diferente dos empréstimos (identificados pelo nº do contrato na coluna Documento), esses
+   pagamentos aparecem no extrato como linhas TEXTUALMENTE IDÊNTICAS (mesmo histórico, mesmo
+   valor, mesmo favorecido) quando há mais de uma parcela do mesmo tipo no mês — nada no
+   extrato diferencia qual é qual. A única forma de separar é pela ORDEM em que aparecem
+   (sempre a mesma sequência, confirmado com o usuário): a 1ª ocorrência da palavra-chave usa
+   "ordem[0]", a 2ª usa "ordem[1]", e assim por diante.
+   ========================================================================= */
+const LOTEAMENTOS_SEED = [
+  { keyword:"J S ADMINISTRACAO DE BENS MOVEIS E IMOVE", valorFixo:2707.90, contaDiferenca:388,
+    ordem:[
+      { conta:598, lote:"05", totalParcelas:47, ultimaParcela:25 },
+      { conta:601, lote:"07", totalParcelas:47, ultimaParcela:25 },
+    ]},
+];
+function loadLoteamentos(){ const raw = localStorage.getItem("bari_loteamentos"); return raw ? JSON.parse(raw) : LOTEAMENTOS_SEED.map(l=>({...l, ordem:l.ordem.map(o=>({...o}))})); }
+function saveLoteamentos(list){ localStorage.setItem("bari_loteamentos", JSON.stringify(list)); }
+let loteamentosDB = loadLoteamentos();
+function renderLoteamentosTable(){
+  const tbl = document.getElementById("loteamentosTable");
+  if(!tbl) return;
+  tbl.innerHTML = `<thead><tr>
+      <th>Palavra-chave</th><th>Valor Fixo</th><th>Ordem (1ª, 2ª, ... ocorrência no mês)</th>
+    </tr></thead><tbody>` +
+    loteamentosDB.map((l,i)=>`<tr>
+      <td>${l.keyword}</td>
+      <td class="num">R$ ${fmtBRL(l.valorFixo)}</td>
+      <td style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-soft);">${l.ordem.map((o,j)=>`${j+1}ª: conta ${o.conta} (lote ${o.lote}, parc. ${o.ultimaParcela}/${o.totalParcelas})`).join(' · ')}</td>
+    </tr>`).join("") + `</tbody>`;
+  document.getElementById("loteamentosJsonArea").value = JSON.stringify(loteamentosDB, null, 2);
+}
+function toggleLoteamentosJson(){ document.getElementById("loteamentosJsonBox").classList.toggle("hidden"); }
+function salvarLoteamentosJson(){
+  const status = document.getElementById("loteamentosJsonStatus");
+  status.classList.remove("hidden","err","ok");
+  try{
+    const parsed = JSON.parse(document.getElementById("loteamentosJsonArea").value);
+    if(!Array.isArray(parsed)) throw new Error("Precisa ser uma lista.");
+    loteamentosDB = parsed;
+    saveLoteamentos(loteamentosDB);
+    renderLoteamentosTable();
+    status.classList.add("ok"); status.textContent = "Cadastro de loteamentos salvo.";
+  }catch(err){ status.classList.add("err"); status.textContent = "JSON inválido: " + err.message; }
+}
+function buildLoteamentoEntries(lot, cfg, linha){
+  const parcela = cfg.ultimaParcela + 1;
+  const hist = `PAGAMENTO REF. PARC. ${String(parcela).padStart(2,"0")}/${cfg.totalParcelas} LOTE ${cfg.lote} QD A - J S ADM BENS MOVEIS E IMOVEIS`;
+  const diferenca = Math.round((linha.valor - lot.valorFixo)*100)/100;
+  cfg._ultimaParcelaPendente = parcela;
+  return [
+    {debito:cfg.conta, credito:null, valor:lot.valorFixo, hist, iniciaLote:1},
+    {debito:null, credito:20, valor:linha.valor, hist, iniciaLote:null},
+    {debito:lot.contaDiferenca, credito:null, valor:diferenca, hist, iniciaLote:null},
+  ];
+}
+
 /* ---- Motor: reconhece padrão/empréstimo/ignorar, senão cai no fallback (só conta banco) ----
    Busca nas palavras-chave inclui histórico E o texto de descrição adicional (nomeFrag) — no
    extrato do Sicoob, quem aparece (nome do favorecido, CNPJ) frequentemente vem numa linha
@@ -1785,7 +1857,27 @@ function processarLancamentos(){
   const rows = [];
   let excluidas = 0;
   const contratosUsados = new Set();
+  const cfgsLoteUsados = new Set();
+  loteamentosDB.forEach(l=>{ l._occurCount = 0; }); // reseta a contagem de ordem a cada processamento
   linhas.forEach(l=>{
+    // loteamentos (linhas idênticas, diferenciadas só pela ordem de aparição) — checado ANTES
+    // do "ignorar" porque a categoria genérica delas (Déb.Tit.Compe Efetivado) normalmente é
+    // ignorada; aqui precisam do tratamento especial em vez de cair fora.
+    const buscaTexto = normalizeText(l.historico + " " + (l.nomeFrag||""));
+    const lot = loteamentosDB.find(lt => buscaTexto.includes(normalizeText(lt.keyword)));
+    if(lot){
+      lot._occurCount = (lot._occurCount||0) + 1;
+      const cfg = lot.ordem[lot._occurCount - 1];
+      if(!cfg){
+        rows.push({data:l.data, debito:null, credito:20, valor:l.valor, hist:null, complemento:`${l.historico} — ${lot._occurCount}ª ocorrência de "${lot.keyword}" no mês, mas só há ${lot.ordem.length} configurada(s) no cadastro`, iniciaLote:1, flag:true, statusText:"Ocorrência a mais do que o esperado — confira/cadastre manualmente"});
+        return;
+      }
+      const entries = buildLoteamentoEntries(lot, cfg, l);
+      entries.forEach((e,i)=> rows.push({...e, data:l.data, flag:false, statusText:`OK (${lot._occurCount}ª ocorrência — lote ${cfg.lote})`}));
+      cfgsLoteUsados.add(cfg);
+      return;
+    }
+
     const p = matchIgnorarOuPadrao(l.historico, l.nomeFrag);
     if(p && p.ignorar){ excluidas++; return; }
 
@@ -1835,9 +1927,11 @@ function processarLancamentos(){
     if(l.tipo==="C") d=20; else c=20;
     rows.push({data:l.data, debito:d, credito:c, valor:l.valor, hist:null, complemento:l.historico + (l.nomeFrag?(" "+l.nomeFrag):""), iniciaLote:1, flag:true, statusText:"Sem padrão cadastrado — complete a outra conta à mão"});
   });
-  // só confirma (incrementa) a última parcela dos contratos que realmente geraram lançamento nesta rodada
+  // só confirma (incrementa) a última parcela dos contratos/lotes que realmente geraram lançamento nesta rodada
   contratosUsados.forEach(emp=>{ if(emp._ultimaParcelaPendente!=null){ emp.ultimaParcela = emp._ultimaParcelaPendente; delete emp._ultimaParcelaPendente; } });
   if(contratosUsados.size) saveEmprestimos(emprestimosDB);
+  cfgsLoteUsados.forEach(cfg=>{ if(cfg._ultimaParcelaPendente!=null){ cfg.ultimaParcela = cfg._ultimaParcelaPendente; delete cfg._ultimaParcelaPendente; } });
+  if(cfgsLoteUsados.size) saveLoteamentos(loteamentosDB);
   lancRowsState = rows;
   renderLancResult(rows, excluidas);
 }
@@ -1915,6 +2009,7 @@ function downloadLancTxt(){
 
 renderPadroesTable();
 renderEmprestimosTable();
+renderLoteamentosTable();
 </script>
 
 <script type="module">
