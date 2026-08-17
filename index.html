@@ -1651,7 +1651,20 @@ const PADROES_SEED = [
   // cair no padrão direcional acima, não aqui.
   {keywords:["PIX RECEBIDO - OUTRA IF"], debito:null, credito:null, hist:"", ignorar:true},
 ];
-function loadPadroes(){ const raw = localStorage.getItem("bari_lancamentos_padroes"); return raw ? JSON.parse(raw) : PADROES_SEED.map(p=>({...p})); }
+// Faz merge do que já está salvo no navegador com o seed do código: qualquer padrão/contrato/
+// lote NOVO que eu adicionar numa atualização futura precisa aparecer sozinho pros usuários que
+// já processaram algo antes (senão o localStorage antigo esconde pra sempre tudo que foi
+// adicionado depois) — sem sobrescrever edições que o usuário já fez nos itens existentes
+// (última parcela, valor base etc.), por isso só ADICIONA o que falta, nunca substitui.
+function loadPadroes(){
+  const raw = localStorage.getItem("bari_lancamentos_padroes");
+  const salvo = raw ? JSON.parse(raw) : [];
+  const chaves = new Set(salvo.map(p=>(p.keywords||[]).join("|")));
+  const novos = PADROES_SEED.filter(p=>!chaves.has((p.keywords||[]).join("|"))).map(p=>({...p}));
+  const combinado = [...salvo, ...novos];
+  if(novos.length) savePadroes(combinado);
+  return combinado;
+}
 function savePadroes(list){ localStorage.setItem("bari_lancamentos_padroes", JSON.stringify(list)); }
 let padroesDB = loadPadroes();
 function renderPadroesTable(){
@@ -1736,7 +1749,15 @@ const EMPRESTIMOS_SEED = [
       {conta:382, lado:"D", tipo:"diferenca"},
   ]},
 ];
-function loadEmprestimos(){ const raw = localStorage.getItem("bari_emprestimos"); return raw ? JSON.parse(raw) : EMPRESTIMOS_SEED.map(e=>({...e, pernas:e.pernas.map(p=>({...p}))})); }
+function loadEmprestimos(){
+  const raw = localStorage.getItem("bari_emprestimos");
+  const salvo = raw ? JSON.parse(raw) : [];
+  const contratosSalvos = new Set(salvo.map(e=>e.contrato));
+  const novos = EMPRESTIMOS_SEED.filter(e=>!contratosSalvos.has(e.contrato)).map(e=>({...e, pernas:e.pernas.map(p=>({...p}))}));
+  const combinado = [...salvo, ...novos];
+  if(novos.length) saveEmprestimos(combinado);
+  return combinado;
+}
 function saveEmprestimos(list){ localStorage.setItem("bari_emprestimos", JSON.stringify(list)); }
 let emprestimosDB = loadEmprestimos();
 function renderEmprestimosTable(){
@@ -1795,7 +1816,15 @@ const LOTEAMENTOS_SEED = [
       { conta:599, lote:"26", qd:"K", totalParcelas:108, ultimaParcela:33, valorFixo:1266.63, contaDiferenca:382 },
     ]},
 ];
-function loadLoteamentos(){ const raw = localStorage.getItem("bari_loteamentos"); return raw ? JSON.parse(raw) : LOTEAMENTOS_SEED.map(l=>({...l, ordem:l.ordem.map(o=>({...o}))})); }
+function loadLoteamentos(){
+  const raw = localStorage.getItem("bari_loteamentos");
+  const salvo = raw ? JSON.parse(raw) : [];
+  const chaves = new Set(salvo.map(l=>l.keyword));
+  const novos = LOTEAMENTOS_SEED.filter(l=>!chaves.has(l.keyword)).map(l=>({...l, ordem:l.ordem.map(o=>({...o}))}));
+  const combinado = [...salvo, ...novos];
+  if(novos.length) saveLoteamentos(combinado);
+  return combinado;
+}
 function saveLoteamentos(list){ localStorage.setItem("bari_loteamentos", JSON.stringify(list)); }
 let loteamentosDB = loadLoteamentos();
 function renderLoteamentosTable(){
