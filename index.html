@@ -1626,6 +1626,7 @@ async function parseExtratoSicoobTodos(file){
 const PADROES_SEED = [
   {keywords:["TARIFA COBRANÇA"], debito:384, credito:20, hist:"PAGAMENTO REF. TARIFA BANCARIA POR EMISSÃO DE BOLETO", ignorar:false},
   {keywords:["DÉB.SEGURO EMPRÉSTIMO"], debito:355, credito:20, hist:"PAGAMENTO REF. SEGURO DE EMPRÉSTIMO", ignorar:false},
+  {keywords:["DÉB.IOF"], debito:385, credito:20, hist:"PAGAMENTO REF. IOF", ignorar:false},
   {keywords:["CRÉD.LIQUIDAÇÃO COBRANÇA"], debito:null, credito:null, hist:"", ignorar:true},
   {keywords:["DÉB.CONV.TRIBUTOS FEDERAIS"], debito:null, credito:null, hist:"", ignorar:true},
   {keywords:["DÉB.TIT.COMPE EFETIVADO"], debito:null, credito:null, hist:"", ignorar:true},
@@ -1760,10 +1761,23 @@ function salvarEmprestimosJson(){
    "ordem[0]", a 2ª usa "ordem[1]", e assim por diante.
    ========================================================================= */
 const LOTEAMENTOS_SEED = [
-  { keyword:"J S ADMINISTRACAO DE BENS MOVEIS E IMOVE", valorFixo:2707.90, contaDiferenca:388,
+  // modo "ordem": as parcelas do mês repetem sempre a mesma sequência de aparição no extrato —
+  // 1ª ocorrência = ordem[0], 2ª = ordem[1] etc.
+  { keyword:"J S ADMINISTRACAO DE BENS MOVEIS E IMOVE", modo:"ordem", sufixo:"J S ADM BENS MOVEIS E IMOVEIS",
     ordem:[
-      { conta:598, lote:"05", totalParcelas:47, ultimaParcela:25 },
-      { conta:601, lote:"07", totalParcelas:47, ultimaParcela:25 },
+      { conta:598, lote:"05", qd:"A", totalParcelas:47, ultimaParcela:25, valorFixo:2707.90, contaDiferenca:388 },
+      { conta:601, lote:"07", qd:"A", totalParcelas:47, ultimaParcela:25, valorFixo:2707.90, contaDiferenca:388 },
+    ]},
+  // modo "valor_desc": os valores não se repetem de um mês pro outro (parcelas de contratos
+  // diferentes, cada um com seu próprio valor) — casa da maior pra menor linha do extrato
+  // contra ordem[0], ordem[1] etc.; empate de valor é desempatado pela ordem de aparição no
+  // extrato cruzada com a ordem cadastrada aqui.
+  { keyword:"LOTEAMENTO RESIDENCIAL VILLAGG", modo:"valor_desc", sufixo:"LOTEAMENTO RESIDENCIAL VILLAGIO SPE LTDA",
+    ordem:[
+      { conta:619, lote:"06", qd:"M", totalParcelas:120, ultimaParcela:19, valorFixo:1395.00, contaDiferenca:382 },
+      { conta:600, lote:"14", qd:"M", totalParcelas:120, ultimaParcela:20, valorFixo:1317.50, contaDiferenca:382 },
+      { conta:602, lote:"03", qd:"M", totalParcelas:108, ultimaParcela:33, valorFixo:1266.67, contaDiferenca:382 },
+      { conta:599, lote:"26", qd:"K", totalParcelas:108, ultimaParcela:33, valorFixo:1266.63, contaDiferenca:382 },
     ]},
 ];
 function loadLoteamentos(){ const raw = localStorage.getItem("bari_loteamentos"); return raw ? JSON.parse(raw) : LOTEAMENTOS_SEED.map(l=>({...l, ordem:l.ordem.map(o=>({...o}))})); }
@@ -1773,12 +1787,12 @@ function renderLoteamentosTable(){
   const tbl = document.getElementById("loteamentosTable");
   if(!tbl) return;
   tbl.innerHTML = `<thead><tr>
-      <th>Palavra-chave</th><th>Valor Fixo</th><th>Ordem (1ª, 2ª, ... ocorrência no mês)</th>
+      <th>Palavra-chave</th><th>Modo</th><th>Ordem (rank → conta / valor fixo / parcela)</th>
     </tr></thead><tbody>` +
     loteamentosDB.map((l,i)=>`<tr>
       <td>${l.keyword}</td>
-      <td class="num">R$ ${fmtBRL(l.valorFixo)}</td>
-      <td style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-soft);">${l.ordem.map((o,j)=>`${j+1}ª: conta ${o.conta} (lote ${o.lote}, parc. ${o.ultimaParcela}/${o.totalParcelas})`).join(' · ')}</td>
+      <td>${l.modo==="valor_desc"?"Maior→menor":"Ordem de aparição"}</td>
+      <td style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-soft);">${l.ordem.map((o,j)=>`${j+1}ª: conta ${o.conta} (lote ${o.lote} R$${fmtBRL(o.valorFixo)}, parc. ${o.ultimaParcela}/${o.totalParcelas})`).join(' · ')}</td>
     </tr>`).join("") + `</tbody>`;
   document.getElementById("loteamentosJsonArea").value = JSON.stringify(loteamentosDB, null, 2);
 }
@@ -1797,14 +1811,30 @@ function salvarLoteamentosJson(){
 }
 function buildLoteamentoEntries(lot, cfg, linha){
   const parcela = cfg.ultimaParcela + 1;
-  const hist = `PAGAMENTO REF. PARC. ${String(parcela).padStart(2,"0")}/${cfg.totalParcelas} LOTE ${cfg.lote} QD A - J S ADM BENS MOVEIS E IMOVEIS`;
-  const diferenca = Math.round((linha.valor - lot.valorFixo)*100)/100;
+  const hist = `PAGAMENTO REF. PARC. ${String(parcela).padStart(2,"0")}/${cfg.totalParcelas} LOTE ${cfg.lote} QD ${cfg.qd} - ${lot.sufixo}`;
+  const diferenca = Math.round((linha.valor - cfg.valorFixo)*100)/100;
   cfg._ultimaParcelaPendente = parcela;
   return [
-    {debito:cfg.conta, credito:null, valor:lot.valorFixo, hist, iniciaLote:1},
+    {debito:cfg.conta, credito:null, valor:cfg.valorFixo, hist, iniciaLote:1},
     {debito:null, credito:20, valor:linha.valor, hist, iniciaLote:null},
-    {debito:lot.contaDiferenca, credito:null, valor:diferenca, hist, iniciaLote:null},
+    {debito:cfg.contaDiferenca, credito:null, valor:diferenca, hist, iniciaLote:null},
   ];
+}
+// Pra grupos "valor_desc": junta todas as linhas que casam com a palavra-chave, ordena da
+// maior pra menor (empate desempatado pela ordem de aparição no extrato) e atribui cada
+// posição do ranking a ordem[0], ordem[1] etc. — precisa ver TODAS as linhas do mês de uma vez
+// antes de decidir, por isso roda numa pré-passada, não dentro do loop principal.
+function preAtribuirLoteamentosPorValor(linhas){
+  const atrib = new Map();
+  loteamentosDB.forEach(lot=>{
+    if(lot.modo !== "valor_desc") return;
+    const candidatas = linhas
+      .map((l,i)=>({l,i}))
+      .filter(({l})=> normalizeText(l.historico + " " + (l.nomeFrag||"")).includes(normalizeText(lot.keyword)));
+    const ordenadas = candidatas.slice().sort((a,b)=> b.l.valor - a.l.valor || a.i - b.i);
+    ordenadas.forEach((item, rank)=>{ atrib.set(item.l, {lot, cfg: lot.ordem[rank]}); });
+  });
+  return atrib;
 }
 
 /* ---- Motor: reconhece padrão/empréstimo/ignorar, senão cai no fallback (só conta banco) ----
@@ -1859,21 +1889,30 @@ function processarLancamentos(){
   const contratosUsados = new Set();
   const cfgsLoteUsados = new Set();
   loteamentosDB.forEach(l=>{ l._occurCount = 0; }); // reseta a contagem de ordem a cada processamento
+  const preAtrib = preAtribuirLoteamentosPorValor(linhas); // grupos "valor_desc" precisam ver todas as linhas do mês de uma vez, antes do loop
   linhas.forEach(l=>{
-    // loteamentos (linhas idênticas, diferenciadas só pela ordem de aparição) — checado ANTES
-    // do "ignorar" porque a categoria genérica delas (Déb.Tit.Compe Efetivado) normalmente é
-    // ignorada; aqui precisam do tratamento especial em vez de cair fora.
-    const buscaTexto = normalizeText(l.historico + " " + (l.nomeFrag||""));
-    const lot = loteamentosDB.find(lt => buscaTexto.includes(normalizeText(lt.keyword)));
+    // loteamentos (linhas idênticas ou de valor variável, diferenciadas por ordem de
+    // aparição ou por ranking de valor) — checado ANTES do "ignorar" porque a categoria
+    // genérica delas (Déb.Tit.Compe Efetivado) normalmente é ignorada; aqui precisam do
+    // tratamento especial em vez de cair fora.
+    let lot, cfg;
+    if(preAtrib.has(l)){
+      ({lot, cfg} = preAtrib.get(l));
+    } else {
+      const buscaTexto = normalizeText(l.historico + " " + (l.nomeFrag||""));
+      const found = loteamentosDB.find(lt => lt.modo!=="valor_desc" && buscaTexto.includes(normalizeText(lt.keyword)));
+      if(found){
+        found._occurCount = (found._occurCount||0) + 1;
+        lot = found; cfg = found.ordem[found._occurCount - 1];
+      }
+    }
     if(lot){
-      lot._occurCount = (lot._occurCount||0) + 1;
-      const cfg = lot.ordem[lot._occurCount - 1];
       if(!cfg){
-        rows.push({data:l.data, debito:null, credito:20, valor:l.valor, hist:null, complemento:`${l.historico} — ${lot._occurCount}ª ocorrência de "${lot.keyword}" no mês, mas só há ${lot.ordem.length} configurada(s) no cadastro`, iniciaLote:1, flag:true, statusText:"Ocorrência a mais do que o esperado — confira/cadastre manualmente"});
+        rows.push({data:l.data, debito:null, credito:20, valor:l.valor, hist:null, complemento:`${l.historico} — mais ocorrência(s) de "${lot.keyword}" no mês do que as ${lot.ordem.length} configurada(s) no cadastro`, iniciaLote:1, flag:true, statusText:"Ocorrência a mais do que o esperado — confira/cadastre manualmente"});
         return;
       }
       const entries = buildLoteamentoEntries(lot, cfg, l);
-      entries.forEach((e,i)=> rows.push({...e, data:l.data, flag:false, statusText:`OK (${lot._occurCount}ª ocorrência — lote ${cfg.lote})`}));
+      entries.forEach((e,i)=> rows.push({...e, data:l.data, flag:false, statusText:`OK (lote ${cfg.lote})`}));
       cfgsLoteUsados.add(cfg);
       return;
     }
