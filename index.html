@@ -262,7 +262,7 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
       <button class="btn ghost" onclick="togglePadroesJson()">Editar via JSON (padrões direcionais/com lançamento automático)</button>
     </div>
     <div id="padroesJsonBox" class="hidden" style="margin-top:10px;">
-      <div class="help">Pra padrões "direcionais" (a conta muda de débito/crédito conforme o dinheiro entra ou sai — ex. empréstimo PJ Ferrara), use <code>contaDirecional</code> + <code>histSaida</code> + <code>histEntrada</code> em vez de <code>debito</code>/<code>credito</code>/<code>hist</code>. Pra um lançamento que sempre acompanha outro (ex. Cristiano/lucros), use <code>companion:{debito,credito,hist}</code>.</div>
+      <div class="help">Pra padrões "direcionais" (a conta muda de débito/crédito conforme o dinheiro entra ou sai — ex. empréstimo PJ Ferrara), use <code>contaDirecional</code> + <code>histSaida</code> + <code>histEntrada</code> em vez de <code>debito</code>/<code>credito</code>/<code>hist</code>. Pra um lançamento que sempre acompanha outro (ex. Cristiano/lucros), use <code>companion:{debito,credito,hist}</code>. Pra um histórico calculado a partir da data (ex. a fatura do cartão sempre cita o mês anterior ao pagamento), use <code>histFn:"nomeDaFuncao"</code> em vez de <code>hist</code> — a função precisa existir no código, dentro de <code>HIST_FUNCOES</code> (peça pro Claude adicionar uma nova se precisar).</div>
       <textarea id="padroesJsonArea" style="width:100%;min-height:220px;font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px;border:1.5px solid var(--rule-strong);border-radius:4px;"></textarea>
       <div class="btn-row"><button class="btn small" onclick="salvarPadroesJson()">Salvar</button></div>
       <div id="padroesJsonStatus" class="status-line hidden"></div>
@@ -1685,11 +1685,18 @@ function renderPadroesTable(){
           <td><button class="btn small ghost" onclick="removePadraoRow(${i})">✕</button></td>
         </tr>`;
       }
+      // Padrão com histFn: o histórico NÃO fica no campo "hist" (é calculado a partir da data
+      // de cada lançamento), então um input em branco ali era enganoso — quem procurava pra
+      // conferir/editar não achava nada. Mostra uma prévia calculada com a data de hoje, só
+      // leitura, deixando claro que a edição é via JSON (mudar a função em HIST_FUNCOES).
+      const histCell = p.histFn
+        ? `<span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-soft);" title="Calculado pela função '${p.histFn}' a partir da data de cada lançamento — não editável aqui, só via JSON">Calculado (${p.histFn}): "${(HIST_FUNCOES[p.histFn]?HIST_FUNCOES[p.histFn]({data:{y:new Date().getFullYear(),m:new Date().getMonth()+1,d:new Date().getDate()}}):'?')}"</span>`
+        : `<input class="cell-input wide" value="${p.hist||''}" onchange="updatePadrao(${i},'hist',this.value)">`;
       return `<tr>
       <td class="cell"><input class="cell-input wide" value="${(p.keywords||[]).join(', ')}" onchange="updatePadraoKeywords(${i},this.value)"></td>
       <td class="cell"><input class="cell-input" style="width:70px" value="${p.debito??''}" onchange="updatePadrao(${i},'debito',this.value)"></td>
       <td class="cell"><input class="cell-input" style="width:70px" value="${p.credito??''}" onchange="updatePadrao(${i},'credito',this.value)"></td>
-      <td class="cell"><input class="cell-input wide" value="${p.hist||''}" onchange="updatePadrao(${i},'hist',this.value)"></td>
+      <td class="cell">${histCell}</td>
       <td class="cell" style="text-align:center"><input type="checkbox" ${p.ignorar?'checked':''} onchange="updatePadrao(${i},'ignorar',this.checked)"></td>
       <td><button class="btn small ghost" onclick="removePadraoRow(${i})">✕</button></td>
     </tr>`;
