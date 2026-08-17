@@ -2126,8 +2126,10 @@ function downloadLancTxt(){
   if(pendentes.length){
     if(!confirm(`${pendentes.length} linha(s) ainda marcada(s) pra conferir (conta em branco ou padrão incompleto). Gerar mesmo assim?`)) return;
   }
-  const lines = lancRowsState.map(r=> lancRowArray(r).map((v,i)=> i===3 ? fmtValorTxt(v) : v).join(";"));
-  downloadText("lanctos.txt", lines.join("\r\n") + "\r\n");
+  // O Domínio desconfigura acento no histórico/complemento na importação — tira o acento só
+  // no TXT (o xlsx de conferência continua acentuado, mais legível pra revisar na tela).
+  const lines = lancRowsState.map(r=> lancRowArray(r).map((v,i)=> i===3 ? fmtValorTxt(v) : (i===5 ? stripAccents(v) : v)).join(";"));
+  downloadTextAnsi("lanctos.txt", lines.join("\r\n") + "\r\n");
 }
 
 renderPadroesTable();
