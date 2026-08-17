@@ -232,6 +232,50 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
 
   <div class="card hidden" id="resultEntradasCard"></div>
 
+  <!-- ===================== LANÇAMENTOS CONTÁBEIS ===================== -->
+  <div class="card">
+    <div class="section-title">Lançamentos Contábeis</div>
+    <div class="help">Lê o extrato Sicoob e gera as linhas de razão pro Domínio (mesmo layout usado na Conversões Cibele e nos Lançamentos Mantovani: Data/Débito/Crédito/Valor/Histórico). "Créd. Liquidação Cobrança" e "Déb.Tit.Compe Efetivado" são ignorados (a baixa já é feita pelas outras duas funções acima); os empréstimos Sicoob reconhecidos pelo nº do contrato viram lançamentos compostos (várias contas, mesmo lote) automaticamente, incrementando o número da parcela a cada mês. O que não bate com nenhum padrão cadastrado vira uma linha só com a conta banco, pra você completar à mão.</div>
+    <div class="field-row">
+      <div class="field">
+        <label>Extrato Sicoob (PDF)</label>
+        <div class="dropzone small-drop" id="extratoLancDrop"><div class="big">Arraste o PDF aqui</div><div class="small">Mesmo extrato usado nas baixas — lê todas as linhas dessa vez</div><input type="file" id="extratoLancFile" accept="application/pdf"></div>
+      </div>
+      <div class="field">
+        <label>Código Emp. (Domínio)</label>
+        <input type="text" id="lancCodEmp" value="193" style="padding:7px 9px;border:1.5px solid var(--rule-strong);border-radius:4px;font-size:13.5px;font-family:'IBM Plex Mono',monospace;background:var(--paper-raised);color:var(--ink);width:100%;">
+      </div>
+    </div>
+    <div class="btn-row"><button class="btn" id="processLancBtn" disabled onclick="processarLancamentos()">Processar</button></div>
+    <div id="lancStatus" class="status-line hidden"></div>
+  </div>
+
+  <div class="card hidden" id="resultLancCard"></div>
+
+  <!-- ===================== CADASTRO: LANÇAMENTOS PADRÕES ===================== -->
+  <div class="card">
+    <div class="section-title">Cadastro — Lançamentos Padrões</div>
+    <div class="help">De-para de palavra-chave (do histórico do extrato) → contas de débito/crédito. Deixe Débito ou Crédito em branco pra usar só a conta banco (20) nesse lado, com o outro em branco pra completar à mão. Marque "Ignorar" pra excluir do lançamento (ex.: o que já vira baixa noutra função). Clique em "+ Novo padrão" pra adicionar mais regras — esse cadastro é só desta ferramenta (Bari), não é compartilhado com as outras.</div>
+    <div class="table-wrap"><table class="preview" id="padroesTable"></table></div>
+    <div class="btn-row"><button class="btn" onclick="addPadraoRow()">+ Novo padrão</button></div>
+  </div>
+
+  <!-- ===================== CADASTRO: EMPRÉSTIMOS ===================== -->
+  <div class="card">
+    <div class="section-title">Cadastro — Empréstimos Sicoob</div>
+    <div class="help">Contratos de empréstimo reconhecidos pelo número que aparece na coluna "Documento" do extrato (ex. "01916198" → contrato 1916198). "Última Parcela" incrementa sozinho a cada lançamento processado — corrija manualmente se pular um mês. Pra adicionar um contrato novo ou mudar a composição das contas (o "pernas"), use "Editar via JSON" — cada perna é <code>{conta, lado:'D'|'C', tipo:'banco'|'fixo'|'diferenca'}</code> ("banco" = valor pago naquele débito do extrato, "fixo" = valor sempre igual, "diferenca" = a única perna que fecha o lote, calculada sozinha).</div>
+    <div class="table-wrap"><table class="preview" id="emprestimosTable"></table></div>
+    <div class="btn-row">
+      <button class="btn ghost" onclick="toggleEmprestimosJson()">Editar via JSON</button>
+      <button class="btn ghost" onclick="exportJson('bari_emprestimos_export','emprestimos.json')">Exportar JSON</button>
+    </div>
+    <div id="emprestimosJsonBox" class="hidden" style="margin-top:10px;">
+      <textarea id="emprestimosJsonArea" style="width:100%;min-height:220px;font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px;border:1.5px solid var(--rule-strong);border-radius:4px;"></textarea>
+      <div class="btn-row"><button class="btn small" onclick="salvarEmprestimosJson()">Salvar</button></div>
+      <div id="emprestimosJsonStatus" class="status-line hidden"></div>
+    </div>
+  </div>
+
   <footer>Lançamentos Bari · Cricon Contabilidade — uso interno</footer>
 </div>
 
@@ -1511,6 +1555,298 @@ wireDropzone("cadPdfDrop","cadPdfFile", async (f,d)=>{
     status.classList.add("err"); status.textContent = "Erro: " + err.message;
   }
 });
+
+/* =========================================================================
+   LANÇAMENTOS CONTÁBEIS — extrato Sicoob inteiro (créditos e débitos) vira
+   lançamentos de razão pro Domínio, mesmo layout usado na Conversões
+   Cibele/Lançamentos Mantovani (Data/Débito/Crédito/Valor/Histórico/Inicia
+   Lote/Código Emp.). "Inicia Lote"=1 marca a 1ª linha de um lançamento —
+   linhas seguintes com Inicia Lote em branco pertencem ao mesmo lote
+   (lançamento composto, várias contas), só a SOMA do lote precisa fechar
+   Débito=Crédito, não cada linha isoladamente.
+   ========================================================================= */
+function exportJson(key, filename){ downloadText(filename, localStorage.getItem(key)||"[]", "application/json"); }
+
+/* ---- Extrato Sicoob — TODAS as linhas (créditos e débitos), com documento (pro nº do contrato de empréstimo) ---- */
+async function parseExtratoSicoobTodos(file){
+  const pages = await extractPdfAllLines(file);
+  const allLines = pages.flat();
+  const fullText = allLines.join("\n");
+  const pm = fullText.match(/Periodo:\s*\d{2}\/\d{2}\/(\d{4})\s*-\s*\d{2}\/\d{2}\/(\d{4})/i);
+  const anoRef = pm ? parseInt(pm[2]) : new Date().getFullYear();
+  const linhas = [];
+  for(let i=0;i<allLines.length;i++){
+    const dm = allLines[i].match(/^(\d{2})\/(\d{2})\s+(.*)$/);
+    if(!dm) continue;
+    const [, dd, mm, rest] = dm;
+    if(/^SALDO/i.test(rest.trim())) continue;
+    const valLine = allLines[i+1];
+    const vm = valLine && valLine.match(/^R\$\s*([\d.,]+)([CD])$/);
+    if(!vm) continue;
+    const restM = rest.match(/^(\S+)\s+(.+)$/);
+    const documento = restM ? restM[1] : "";
+    const hist = restM ? restM[2] : rest;
+    let nomeFrag = "";
+    let j = i+2;
+    while(j < allLines.length && j <= i+3 && !/^\d{2}\/\d{2}\s/.test(allLines[j])){
+      nomeFrag += (nomeFrag?" ":"") + allLines[j];
+      j++;
+    }
+    linhas.push({data:{y:anoRef, m:parseInt(mm), d:parseInt(dd)}, documento, historico:hist, nomeFrag, valor:parseBRL(vm[1]), tipo:vm[2]});
+  }
+  return linhas;
+}
+
+/* ---- Cadastro: Lançamentos Padrões (de-para palavra-chave → contas) ---- */
+const PADROES_SEED = [
+  {keywords:["TARIFA COBRANÇA"], debito:384, credito:20, hist:"PAGAMENTO REF. TARIFA BANCARIA POR EMISSÃO DE BOLETO", ignorar:false},
+  {keywords:["DÉB.SEGURO EMPRÉSTIMO"], debito:355, credito:20, hist:"PAGAMENTO REF. SEGURO DE EMPRÉSTIMO", ignorar:false},
+  {keywords:["CRÉD.LIQUIDAÇÃO COBRANÇA"], debito:null, credito:null, hist:"", ignorar:true},
+  {keywords:["DÉB.CONV.TRIBUTOS FEDERAIS"], debito:null, credito:null, hist:"", ignorar:true},
+  {keywords:["DÉB.TIT.COMPE EFETIVADO"], debito:null, credito:null, hist:"", ignorar:true},
+];
+function loadPadroes(){ const raw = localStorage.getItem("bari_lancamentos_padroes"); return raw ? JSON.parse(raw) : PADROES_SEED.map(p=>({...p})); }
+function savePadroes(list){ localStorage.setItem("bari_lancamentos_padroes", JSON.stringify(list)); }
+let padroesDB = loadPadroes();
+function renderPadroesTable(){
+  const tbl = document.getElementById("padroesTable");
+  tbl.innerHTML = `<thead><tr>
+      <th>Palavras-chave (separadas por vírgula)</th><th>Débito</th><th>Crédito</th><th>Histórico</th><th>Ignorar</th><th></th>
+    </tr></thead><tbody>` +
+    padroesDB.map((p,i)=>`<tr>
+      <td class="cell"><input class="cell-input wide" value="${(p.keywords||[]).join(', ')}" onchange="updatePadraoKeywords(${i},this.value)"></td>
+      <td class="cell"><input class="cell-input" style="width:70px" value="${p.debito??''}" onchange="updatePadrao(${i},'debito',this.value)"></td>
+      <td class="cell"><input class="cell-input" style="width:70px" value="${p.credito??''}" onchange="updatePadrao(${i},'credito',this.value)"></td>
+      <td class="cell"><input class="cell-input wide" value="${p.hist||''}" onchange="updatePadrao(${i},'hist',this.value)"></td>
+      <td class="cell" style="text-align:center"><input type="checkbox" ${p.ignorar?'checked':''} onchange="updatePadrao(${i},'ignorar',this.checked)"></td>
+      <td><button class="btn small ghost" onclick="removePadraoRow(${i})">✕</button></td>
+    </tr>`).join("") + `</tbody>`;
+}
+function updatePadrao(i, field, val){
+  if(field==="debito" || field==="credito"){ padroesDB[i][field] = String(val).trim()===""?null:Number(val); }
+  else if(field==="ignorar"){ padroesDB[i][field] = val; }
+  else { padroesDB[i][field] = val; }
+  savePadroes(padroesDB);
+}
+function updatePadraoKeywords(i, val){ padroesDB[i].keywords = val.split(",").map(s=>s.trim()).filter(Boolean); savePadroes(padroesDB); }
+function addPadraoRow(){ padroesDB.push({keywords:[],debito:null,credito:null,hist:"",ignorar:false}); savePadroes(padroesDB); renderPadroesTable(); }
+function removePadraoRow(i){ padroesDB.splice(i,1); savePadroes(padroesDB); renderPadroesTable(); }
+
+/* ---- Cadastro: Empréstimos Sicoob (reconhecidos pelo nº do contrato no "Documento") ---- */
+const EMPRESTIMOS_SEED = [
+  { contrato:"1916198", totalParcelas:24, ultimaParcela:20, pernas:[
+      {conta:594, lado:"D", tipo:"banco"},
+      {conta:20,  lado:"C", tipo:"banco"},
+      {conta:595, lado:"D", tipo:"fixo", valor:1958.60},
+      {conta:382, lado:"C", tipo:"fixo", valor:1958.60},
+  ]},
+  { contrato:"2217192", totalParcelas:24, ultimaParcela:4, pernas:[
+      {conta:625, lado:"D", tipo:"fixo", valor:14583.33},
+      {conta:20,  lado:"C", tipo:"banco"},
+      {conta:382, lado:"D", tipo:"diferenca"},
+  ]},
+  { contrato:"2206589", totalParcelas:24, ultimaParcela:3, pernas:[
+      {conta:625, lado:"D", tipo:"fixo", valor:4166.67},
+      {conta:20,  lado:"C", tipo:"banco"},
+      {conta:382, lado:"D", tipo:"diferenca"},
+  ]},
+  { contrato:"1807344", totalParcelas:24, ultimaParcela:22, pernas:[
+      {conta:625, lado:"D", tipo:"fixo", valor:4998.13},
+      {conta:20,  lado:"C", tipo:"banco"},
+      {conta:588, lado:"C", tipo:"fixo", valor:784.95},
+      {conta:382, lado:"D", tipo:"diferenca"},
+  ]},
+];
+function loadEmprestimos(){ const raw = localStorage.getItem("bari_emprestimos"); return raw ? JSON.parse(raw) : EMPRESTIMOS_SEED.map(e=>({...e, pernas:e.pernas.map(p=>({...p}))})); }
+function saveEmprestimos(list){ localStorage.setItem("bari_emprestimos", JSON.stringify(list)); }
+let emprestimosDB = loadEmprestimos();
+function renderEmprestimosTable(){
+  const tbl = document.getElementById("emprestimosTable");
+  tbl.innerHTML = `<thead><tr>
+      <th>Contrato</th><th>Última Parcela</th><th>Total Parcelas</th><th>Pernas (contas envolvidas)</th>
+    </tr></thead><tbody>` +
+    emprestimosDB.map((e,i)=>`<tr>
+      <td>${e.contrato}</td>
+      <td class="cell"><input class="cell-input num" style="width:70px" value="${e.ultimaParcela}" onchange="updateEmprestimo(${i},'ultimaParcela',this.value)"></td>
+      <td class="cell"><input class="cell-input num" style="width:70px" value="${e.totalParcelas}" onchange="updateEmprestimo(${i},'totalParcelas',this.value)"></td>
+      <td style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-soft);">${e.pernas.map(p=>`${p.lado}${p.conta}(${p.tipo}${p.tipo==='fixo'?'='+p.valor:''})`).join(' · ')}</td>
+    </tr>`).join("") + `</tbody>`;
+  document.getElementById("emprestimosJsonArea").value = JSON.stringify(emprestimosDB, null, 2);
+}
+function updateEmprestimo(i, field, val){ emprestimosDB[i][field] = Number(val)||0; saveEmprestimos(emprestimosDB); renderEmprestimosTable(); }
+function toggleEmprestimosJson(){ document.getElementById("emprestimosJsonBox").classList.toggle("hidden"); }
+function salvarEmprestimosJson(){
+  const status = document.getElementById("emprestimosJsonStatus");
+  status.classList.remove("hidden","err","ok");
+  try{
+    const parsed = JSON.parse(document.getElementById("emprestimosJsonArea").value);
+    if(!Array.isArray(parsed)) throw new Error("Precisa ser uma lista de contratos.");
+    emprestimosDB = parsed;
+    saveEmprestimos(emprestimosDB);
+    renderEmprestimosTable();
+    status.classList.add("ok"); status.textContent = "Cadastro de empréstimos salvo.";
+  }catch(err){ status.classList.add("err"); status.textContent = "JSON inválido: " + err.message; }
+}
+
+/* ---- Motor: reconhece padrão/empréstimo/ignorar, senão cai no fallback (só conta banco) ---- */
+function matchIgnorarOuPadrao(historico){
+  const norm = normalizeText(historico);
+  for(const p of padroesDB){
+    for(const kw of (p.keywords||[])){
+      if(kw && norm.includes(normalizeText(kw))) return p;
+    }
+  }
+  return null;
+}
+function buildEmprestimoEntries(emp, linha){
+  const parcela = emp.ultimaParcela + 1;
+  const hist = `PAGAMENTO REF. PARC ${String(parcela).padStart(2,"0")}/${emp.totalParcelas} - EMPRESTIMO BANCO SICOOB - Nº DO CONTRATO: ${emp.contrato}`;
+  const legs = emp.pernas.map(p=>({...p, valor: p.tipo==="banco" ? linha.valor : (p.tipo==="fixo" ? p.valor : null)}));
+  const conhecidas = legs.filter(p=>p.valor!=null);
+  const somaD = conhecidas.filter(p=>p.lado==="D").reduce((s,p)=>s+p.valor,0);
+  const somaC = conhecidas.filter(p=>p.lado==="C").reduce((s,p)=>s+p.valor,0);
+  legs.forEach(p=>{
+    if(p.valor==null) p.valor = Math.round((p.lado==="D" ? somaC-somaD : somaD-somaC)*100)/100;
+  });
+  emp._ultimaParcelaPendente = parcela; // só confirma (incrementa de vez) depois que o usuário processar com sucesso
+  return legs.map((p,i)=>({
+    debito: p.lado==="D"?p.conta:null, credito: p.lado==="C"?p.conta:null,
+    valor: p.valor, hist, complemento:null, iniciaLote: i===0?1:null, origem: linha.historico,
+  }));
+}
+let lancExtratoState = null;
+wireDropzone("extratoLancDrop","extratoLancFile", async (f,d)=>{
+  const status = document.getElementById("lancStatus");
+  status.classList.remove("hidden","err"); status.textContent = "Lendo PDF...";
+  try{
+    lancExtratoState = await parseExtratoSicoobTodos(f);
+    if(!lancExtratoState.length) throw new Error("Não encontrei nenhum lançamento nesse extrato.");
+    markDropDone(d, `${f.name} (${lancExtratoState.length} lançamento(s) no extrato)`);
+    status.classList.add("hidden");
+  }catch(err){
+    status.classList.remove("hidden"); status.classList.add("err"); status.textContent = "Erro: " + err.message;
+    lancExtratoState = null;
+  }
+  document.getElementById("processLancBtn").disabled = !lancExtratoState;
+});
+function processarLancamentos(){
+  const linhas = lancExtratoState;
+  const rows = [];
+  let excluidas = 0;
+  const contratosUsados = new Set();
+  linhas.forEach(l=>{
+    const p = matchIgnorarOuPadrao(l.historico);
+    if(p && p.ignorar){ excluidas++; return; }
+
+    const histNorm = normalizeText(l.historico);
+    if(histNorm.startsWith("DEB.EMPRESTIMO") || histNorm.startsWith("DÉB.EMPRÉSTIMO") || /^D[EÉ]B\.EMPR[EÉ]STIMO/.test(histNorm)){
+      const contrato = onlyDigits(l.documento).replace(/^0+/,"");
+      const emp = emprestimosDB.find(e=>e.contrato===contrato);
+      if(emp){
+        const entries = buildEmprestimoEntries(emp, l);
+        entries.forEach(e=> rows.push({...e, data:l.data, flag:false, statusText:"OK (empréstimo reconhecido)"}));
+        contratosUsados.add(emp);
+        return;
+      }
+      rows.push({data:l.data, debito:null, credito:20, valor:l.valor, hist:null, complemento:`${l.historico} — CONTRATO ${onlyDigits(l.documento)} NÃO CADASTRADO`, iniciaLote:1, flag:true, statusText:"Contrato de empréstimo não cadastrado — complete manualmente ou cadastre o contrato"});
+      return;
+    }
+
+    if(p){
+      const debito = p.debito, credito = p.credito;
+      const matched = debito!=null && credito!=null;
+      let d = debito, c = credito;
+      if(d==null && l.tipo==="C") d = 20;
+      if(c==null && l.tipo==="D") c = 20;
+      rows.push({data:l.data, debito:d, credito:c, valor:l.valor, hist:p.hist||null, complemento: p.hist?null:l.historico, iniciaLote:1, flag:!matched, statusText: matched?"OK (padrão cadastrado)":"Padrão parcial — só a conta banco foi preenchida"});
+      return;
+    }
+
+    // fallback genérico: só a conta banco, resto em branco pra completar à mão
+    let d=null, c=null;
+    if(l.tipo==="C") d=20; else c=20;
+    rows.push({data:l.data, debito:d, credito:c, valor:l.valor, hist:null, complemento:l.historico + (l.nomeFrag?(" "+l.nomeFrag):""), iniciaLote:1, flag:true, statusText:"Sem padrão cadastrado — complete a outra conta à mão"});
+  });
+  // só confirma (incrementa) a última parcela dos contratos que realmente geraram lançamento nesta rodada
+  contratosUsados.forEach(emp=>{ if(emp._ultimaParcelaPendente!=null){ emp.ultimaParcela = emp._ultimaParcelaPendente; delete emp._ultimaParcelaPendente; } });
+  if(contratosUsados.size) saveEmprestimos(emprestimosDB);
+  lancRowsState = rows;
+  renderLancResult(rows, excluidas);
+}
+let lancRowsState = [];
+let lancTableState = makeTableState();
+let lancExcluidasState = 0;
+function renderLancResult(rows, excluidas){
+  document.getElementById("resultLancCard").classList.remove("hidden");
+  lancTableState = makeTableState();
+  lancExcluidasState = excluidas;
+  renderLancTable();
+}
+function renderLancTable(){
+  const box = document.getElementById("resultLancCard");
+  const rows = lancRowsState;
+  const nFlag = rows.filter(r=>r.flag).length;
+  const indexed = filterSortRows(rows, lancTableState, r=>[r.debito,r.credito,r.hist,r.complemento]);
+  let html = `<div class="section-title">Lançamentos — lanctos.txt</div>
+  <div class="summary-row">
+    <div class="item"><div class="k">Linhas</div><div class="v">${rows.length}</div></div>
+    <div class="item"><div class="k">Pra conferir</div><div class="v">${nFlag}</div></div>
+    <div class="item"><div class="k">Excluídas (ignoradas)</div><div class="v">${lancExcluidasState}</div></div>
+  </div>
+  <div class="help">Linhas em amarelo faltam completar (conta em branco, padrão não cadastrado, ou contrato de empréstimo desconhecido) — edite direto na tabela ou cadastre um padrão/empréstimo novo e reprocesse. "Inicia Lote" marca onde cada lançamento começa; linhas de um mesmo lote (ex. empréstimo composto) têm o mesmo histórico e ficam juntas na ordem — não reordene com o filtro antes de exportar.</div>
+  <div class="table-toolbar"><input type="search" value="${lancTableState.filter}" placeholder="Filtrar por conta ou histórico..." oninput="lancTableState.filter=this.value; renderLancTable();"><span class="count">${indexed.length===rows.length?`${rows.length} linha(s)`:`${indexed.length} de ${rows.length}`}</span></div>
+  <div class="table-wrap"><table class="preview"><thead><tr>
+    ${sortTh('lancTableState',lancTableState,'data','Data','renderLancTable')}
+    ${sortTh('lancTableState',lancTableState,'debito','Débito','renderLancTable')}
+    ${sortTh('lancTableState',lancTableState,'credito','Crédito','renderLancTable')}
+    ${sortTh('lancTableState',lancTableState,'valor','Valor','renderLancTable')}
+    <th>Complemento</th><th>Lote</th><th>Status</th>
+  </tr></thead><tbody>`;
+  indexed.forEach(({row:r, idx:i})=>{
+    html += `<tr class="${r.flag?'flag':''}">
+      <td class="cell"><input class="cell-input" value="${fmtDateBR(r.data)}" onchange="updateLancRow(${i},'data',this.value)"></td>
+      <td class="cell"><input class="cell-input" style="width:60px" value="${r.debito??''}" onchange="updateLancRow(${i},'debito',this.value)"></td>
+      <td class="cell"><input class="cell-input" style="width:60px" value="${r.credito??''}" onchange="updateLancRow(${i},'credito',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.valor)}" onchange="updateLancRow(${i},'valor',this.value)"></td>
+      <td class="cell"><input class="cell-input wide" value="${r.hist||r.complemento||''}" onchange="updateLancRow(${i},'complemento',this.value)"></td>
+      <td style="text-align:center">${r.iniciaLote?'●':''}</td>
+      <td>${r.statusText||''}</td>
+    </tr>`;
+  });
+  html += `</tbody></table></div>
+  <div class="btn-row">
+    <button class="btn" onclick="downloadLancXlsx()">Baixar lancamentos.xlsx</button>
+    <button class="btn ghost" onclick="downloadLancTxt()">Baixar lanctos.txt</button>
+  </div>`;
+  box.innerHTML = html;
+}
+function updateLancRow(i, field, val){
+  const r = lancRowsState[i];
+  if(field==="data"){ const dt=brParts(val); if(dt) r.data=dt; }
+  else if(field==="valor"){ const n=parseBRL(val); if(n!=null) r.valor=n; }
+  else if(field==="debito" || field==="credito"){ r[field] = String(val).trim()===""?null:val.trim(); }
+  else if(field==="complemento"){ r.complemento = val; r.hist = null; }
+  if(r.debito!=null && r.credito!=null && (r.hist || r.complemento)) r.flag = false;
+}
+const LANC_HEADER = ["Data","Débito","Crédito","Valor","Cód. Hist.","Complemento Histórico","Inicia Lote","Código Emp.","Centro de Custo Débito","Centro de Custo Crédito"];
+function lancRowArray(r){
+  const codEmp = document.getElementById("lancCodEmp").value.trim();
+  return [fmtDateBR(r.data), r.debito??"", r.credito??"", r.valor, "", r.hist||r.complemento||"", r.iniciaLote??"", codEmp, "", ""];
+}
+function downloadLancXlsx(){
+  downloadXlsx("lancamentos.xlsx", [LANC_HEADER, ...lancRowsState.map(lancRowArray)], "Lancamentos");
+}
+function downloadLancTxt(){
+  const pendentes = lancRowsState.filter(r=>r.flag);
+  if(pendentes.length){
+    if(!confirm(`${pendentes.length} linha(s) ainda marcada(s) pra conferir (conta em branco ou padrão incompleto). Gerar mesmo assim?`)) return;
+  }
+  const lines = lancRowsState.map(r=> lancRowArray(r).map((v,i)=> i===3 ? fmtValorTxt(v) : v).join(";"));
+  downloadText("lanctos.txt", lines.join("\r\n") + "\r\n");
+}
+
+renderPadroesTable();
+renderEmprestimosTable();
 </script>
 
 <script type="module">
