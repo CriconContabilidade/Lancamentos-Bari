@@ -257,7 +257,16 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
     <div class="section-title">Cadastro — Lançamentos Padrões</div>
     <div class="help">De-para de palavra-chave (do histórico do extrato) → contas de débito/crédito. Deixe Débito ou Crédito em branco pra usar só a conta banco (20) nesse lado, com o outro em branco pra completar à mão. Marque "Ignorar" pra excluir do lançamento (ex.: o que já vira baixa noutra função). Clique em "+ Novo padrão" pra adicionar mais regras — esse cadastro é só desta ferramenta (Bari), não é compartilhado com as outras.</div>
     <div class="table-wrap"><table class="preview" id="padroesTable"></table></div>
-    <div class="btn-row"><button class="btn" onclick="addPadraoRow()">+ Novo padrão</button></div>
+    <div class="btn-row">
+      <button class="btn" onclick="addPadraoRow()">+ Novo padrão</button>
+      <button class="btn ghost" onclick="togglePadroesJson()">Editar via JSON (padrões direcionais/com lançamento automático)</button>
+    </div>
+    <div id="padroesJsonBox" class="hidden" style="margin-top:10px;">
+      <div class="help">Pra padrões "direcionais" (a conta muda de débito/crédito conforme o dinheiro entra ou sai — ex. empréstimo PJ Ferrara), use <code>contaDirecional</code> + <code>histSaida</code> + <code>histEntrada</code> em vez de <code>debito</code>/<code>credito</code>/<code>hist</code>. Pra um lançamento que sempre acompanha outro (ex. Cristiano/lucros), use <code>companion:{debito,credito,hist}</code>.</div>
+      <textarea id="padroesJsonArea" style="width:100%;min-height:220px;font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px;border:1.5px solid var(--rule-strong);border-radius:4px;"></textarea>
+      <div class="btn-row"><button class="btn small" onclick="salvarPadroesJson()">Salvar</button></div>
+      <div id="padroesJsonStatus" class="status-line hidden"></div>
+    </div>
   </div>
 
   <!-- ===================== CADASTRO: EMPRÉSTIMOS ===================== -->
@@ -1604,6 +1613,16 @@ const PADROES_SEED = [
   {keywords:["CRÉD.LIQUIDAÇÃO COBRANÇA"], debito:null, credito:null, hist:"", ignorar:true},
   {keywords:["DÉB.CONV.TRIBUTOS FEDERAIS"], debito:null, credito:null, hist:"", ignorar:true},
   {keywords:["DÉB.TIT.COMPE EFETIVADO"], debito:null, credito:null, hist:"", ignorar:true},
+  // Empréstimo (PJ) entre Bari e Ferrara — conta 36 segue o fluxo do dinheiro: débito quando
+  // sai (Bari empresta), crédito quando entra (Ferrara devolve). Aparece de duas formas no
+  // extrato: uma transferência PIX nomeando a Ferrara, e um "Pagamento/Recebimento Pix" que só
+  // mostra o CNPJ dela (08.957.929/0001-15) sem o nome.
+  {keywords:["FERRARA COMERCIO E IMPORTACAO","08.957.929"], contaDirecional:36, histSaida:"PAGAMENTO REF. EMPRÉSTIMO PJ - FERRARA LTDA", histEntrada:"RECEBIMENTO REF. EMPRÉSTIMO CONCEDIDO PJ - FERRARA LTDA", ignorar:false},
+  // Transferência do sócio Cristiano — sempre gera 2 lançamentos: o da movimentação bancária
+  // em si (banco x 411) e um segundo, automático, só entre contas de resultado/PL (262 x 411),
+  // sem tocar o banco — não é opcional, sempre acompanha esse padrão.
+  {keywords:["REM.: CRISTIANO PACHECO BUSSOLO"], debito:null, credito:411, hist:"PAGAMENTO REF. LUCROS DISTRIBUIDOS AO SÓCIO CRISTIANO PACHECO BUSSOLO", ignorar:false,
+    companion:{debito:262, credito:411, hist:"VALOR REF. LUCROS A DISTRIBUIR AO SÓCIO CRISTIANO PACHECO BUSSOLO"}},
 ];
 function loadPadroes(){ const raw = localStorage.getItem("bari_lancamentos_padroes"); return raw ? JSON.parse(raw) : PADROES_SEED.map(p=>({...p})); }
 function savePadroes(list){ localStorage.setItem("bari_lancamentos_padroes", JSON.stringify(list)); }
@@ -1613,14 +1632,29 @@ function renderPadroesTable(){
   tbl.innerHTML = `<thead><tr>
       <th>Palavras-chave (separadas por vírgula)</th><th>Débito</th><th>Crédito</th><th>Histórico</th><th>Ignorar</th><th></th>
     </tr></thead><tbody>` +
-    padroesDB.map((p,i)=>`<tr>
+    padroesDB.map((p,i)=>{
+      const especial = p.contaDirecional!=null || p.companion;
+      if(especial){
+        const desc = p.contaDirecional!=null
+          ? `Direcional: conta ${p.contaDirecional} (D quando sai, C quando entra)`
+          : `Com lançamento automático: D${p.companion.debito??''} C${p.companion.credito??''}`;
+        return `<tr>
+          <td class="cell"><input class="cell-input wide" value="${(p.keywords||[]).join(', ')}" onchange="updatePadraoKeywords(${i},this.value)"></td>
+          <td colspan="3" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-soft);">${desc} — edite via JSON</td>
+          <td class="cell" style="text-align:center"><input type="checkbox" ${p.ignorar?'checked':''} onchange="updatePadrao(${i},'ignorar',this.checked)"></td>
+          <td><button class="btn small ghost" onclick="removePadraoRow(${i})">✕</button></td>
+        </tr>`;
+      }
+      return `<tr>
       <td class="cell"><input class="cell-input wide" value="${(p.keywords||[]).join(', ')}" onchange="updatePadraoKeywords(${i},this.value)"></td>
       <td class="cell"><input class="cell-input" style="width:70px" value="${p.debito??''}" onchange="updatePadrao(${i},'debito',this.value)"></td>
       <td class="cell"><input class="cell-input" style="width:70px" value="${p.credito??''}" onchange="updatePadrao(${i},'credito',this.value)"></td>
       <td class="cell"><input class="cell-input wide" value="${p.hist||''}" onchange="updatePadrao(${i},'hist',this.value)"></td>
       <td class="cell" style="text-align:center"><input type="checkbox" ${p.ignorar?'checked':''} onchange="updatePadrao(${i},'ignorar',this.checked)"></td>
       <td><button class="btn small ghost" onclick="removePadraoRow(${i})">✕</button></td>
-    </tr>`).join("") + `</tbody>`;
+    </tr>`;
+    }).join("") + `</tbody>`;
+  document.getElementById("padroesJsonArea").value = JSON.stringify(padroesDB, null, 2);
 }
 function updatePadrao(i, field, val){
   if(field==="debito" || field==="credito"){ padroesDB[i][field] = String(val).trim()===""?null:Number(val); }
@@ -1631,6 +1665,19 @@ function updatePadrao(i, field, val){
 function updatePadraoKeywords(i, val){ padroesDB[i].keywords = val.split(",").map(s=>s.trim()).filter(Boolean); savePadroes(padroesDB); }
 function addPadraoRow(){ padroesDB.push({keywords:[],debito:null,credito:null,hist:"",ignorar:false}); savePadroes(padroesDB); renderPadroesTable(); }
 function removePadraoRow(i){ padroesDB.splice(i,1); savePadroes(padroesDB); renderPadroesTable(); }
+function togglePadroesJson(){ document.getElementById("padroesJsonBox").classList.toggle("hidden"); }
+function salvarPadroesJson(){
+  const status = document.getElementById("padroesJsonStatus");
+  status.classList.remove("hidden","err","ok");
+  try{
+    const parsed = JSON.parse(document.getElementById("padroesJsonArea").value);
+    if(!Array.isArray(parsed)) throw new Error("Precisa ser uma lista de padrões.");
+    padroesDB = parsed;
+    savePadroes(padroesDB);
+    renderPadroesTable();
+    status.classList.add("ok"); status.textContent = "Cadastro de padrões salvo.";
+  }catch(err){ status.classList.add("err"); status.textContent = "JSON inválido: " + err.message; }
+}
 
 /* ---- Cadastro: Empréstimos Sicoob (reconhecidos pelo nº do contrato no "Documento") ---- */
 const EMPRESTIMOS_SEED = [
@@ -1688,9 +1735,13 @@ function salvarEmprestimosJson(){
   }catch(err){ status.classList.add("err"); status.textContent = "JSON inválido: " + err.message; }
 }
 
-/* ---- Motor: reconhece padrão/empréstimo/ignorar, senão cai no fallback (só conta banco) ---- */
-function matchIgnorarOuPadrao(historico){
-  const norm = normalizeText(historico);
+/* ---- Motor: reconhece padrão/empréstimo/ignorar, senão cai no fallback (só conta banco) ----
+   Busca nas palavras-chave inclui histórico E o texto de descrição adicional (nomeFrag) — no
+   extrato do Sicoob, quem aparece (nome do favorecido, CNPJ) frequentemente vem numa linha
+   extra ABAIXO do histórico, não dentro dele (ex. "TRANSF.REALIZADA PIX SICOOB" é o histórico,
+   "FAV.: FERRARA..." é a linha seguinte) — sem incluir isso aqui, esses padrões nunca casam. */
+function matchIgnorarOuPadrao(historico, nomeFrag){
+  const norm = normalizeText(historico + " " + (nomeFrag||""));
   for(const p of padroesDB){
     for(const kw of (p.keywords||[])){
       if(kw && norm.includes(normalizeText(kw))) return p;
@@ -1735,7 +1786,7 @@ function processarLancamentos(){
   let excluidas = 0;
   const contratosUsados = new Set();
   linhas.forEach(l=>{
-    const p = matchIgnorarOuPadrao(l.historico);
+    const p = matchIgnorarOuPadrao(l.historico, l.nomeFrag);
     if(p && p.ignorar){ excluidas++; return; }
 
     const histNorm = normalizeText(l.historico);
@@ -1752,13 +1803,30 @@ function processarLancamentos(){
       return;
     }
 
+    if(p && p.contaDirecional!=null){
+      // conta única que segue o fluxo: débito quando o dinheiro sai (D), crédito quando entra (C)
+      const saida = l.tipo === "D";
+      const d = saida ? p.contaDirecional : 20;
+      const c = saida ? 20 : p.contaDirecional;
+      const hist = saida ? p.histSaida : p.histEntrada;
+      rows.push({data:l.data, debito:d, credito:c, valor:l.valor, hist:hist||null, complemento: hist?null:l.historico, iniciaLote:1, flag:!hist, statusText: hist?"OK (padrão direcional)":"Padrão direcional sem histórico definido pro sentido desse lançamento"});
+      return;
+    }
+
     if(p){
-      const debito = p.debito, credito = p.credito;
-      const matched = debito!=null && credito!=null;
-      let d = debito, c = credito;
+      let d = p.debito, c = p.credito;
       if(d==null && l.tipo==="C") d = 20;
       if(c==null && l.tipo==="D") c = 20;
+      // "matched" tem que olhar o resultado FINAL (depois do banco preencher o lado em
+      // branco) — um padrão que deixa só um lado fixo de propósito (ex. Cristiano: fixa só
+      // o crédito 411, deixa o banco preencher o débito) é tão "OK" quanto um com os dois
+      // lados fixos; só falta completar de verdade quando nenhum lado ficou definido.
+      const matched = d!=null && c!=null;
       rows.push({data:l.data, debito:d, credito:c, valor:l.valor, hist:p.hist||null, complemento: p.hist?null:l.historico, iniciaLote:1, flag:!matched, statusText: matched?"OK (padrão cadastrado)":"Padrão parcial — só a conta banco foi preenchida"});
+      // companion: lançamento extra, sempre acoplado, que não mexe no banco — mesma data/valor
+      if(p.companion){
+        rows.push({data:l.data, debito:p.companion.debito??null, credito:p.companion.credito??null, valor:l.valor, hist:p.companion.hist||null, complemento:null, iniciaLote:1, flag:false, statusText:"OK (lançamento automático — sempre acompanha o padrão acima)"});
+      }
       return;
     }
 
