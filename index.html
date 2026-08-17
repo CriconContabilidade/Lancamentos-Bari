@@ -272,7 +272,7 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
   <!-- ===================== CADASTRO: EMPRÉSTIMOS ===================== -->
   <div class="card">
     <div class="section-title">Cadastro — Empréstimos Sicoob</div>
-    <div class="help">Contratos de empréstimo reconhecidos pelo número que aparece na coluna "Documento" do extrato (ex. "01916198" → contrato 1916198). "Última Parcela" incrementa sozinho a cada lançamento processado — corrija manualmente se pular um mês. Pra adicionar um contrato novo ou mudar a composição das contas (o "pernas"), use "Editar via JSON" — cada perna é <code>{conta, lado:'D'|'C', tipo:'banco'|'fixo'|'diferenca'}</code> ("banco" = valor pago naquele débito do extrato, "fixo" = valor sempre igual, "diferenca" = a única perna que fecha o lote, calculada sozinha).</div>
+    <div class="help">Contratos de empréstimo reconhecidos pelo número que aparece na coluna "Documento" do extrato (ex. "01916198" → contrato 1916198). "Última Parcela" incrementa sozinho a cada lançamento processado — corrija manualmente se pular um mês. Pra adicionar um contrato novo ou mudar a composição das contas (o "pernas"), use "Editar via JSON" — cada perna é <code>{conta, lado:'D'|'C', tipo:'banco'|'fixo'|'diferenca'}</code> ("banco" = valor pago naquele débito do extrato, "fixo" = valor que costuma se repetir mas pode variar aos poucos com o tempo — <b>atualize aqui quando perceber que mudou</b>, senão a "diferença" sai calculada errada, mesmo balanceando certinho, "diferenca" = a única perna que fecha o lote, calculada sozinha).</div>
     <div class="table-wrap"><table class="preview" id="emprestimosTable"></table></div>
     <div class="btn-row">
       <button class="btn ghost" onclick="toggleEmprestimosJson()">Editar via JSON</button>
@@ -288,7 +288,7 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
   <!-- ===================== CADASTRO: LOTEAMENTOS ===================== -->
   <div class="card">
     <div class="section-title">Cadastro — Loteamentos/Parcelamentos (linhas idênticas)</div>
-    <div class="help">Pra pagamentos que aparecem no extrato como linhas <b>idênticas</b> quando há mais de uma parcela do mesmo tipo no mês (mesmo histórico, mesmo valor, mesmo favorecido — ex. duas parcelas J.S Administração, lotes diferentes) — nada no extrato diferencia qual é qual, então a ordem de aparição decide: a 1ª ocorrência usa a 1ª configuração da lista "Ordem", a 2ª usa a 2ª, e assim por diante. Use "Editar via JSON" pra adicionar um novo grupo ou corrigir a ordem/contas.</div>
+    <div class="help">Pra pagamentos que aparecem no extrato como linhas <b>idênticas</b> (ou de valor parecido) quando há mais de uma parcela do mesmo tipo no mês — nada no extrato diferencia qual é qual, então a ordem de aparição (ou o ranking de valor, maior→menor) decide. <b>"Valor Base" muda todo mês</b> (correção monetária da parcela) — confira e atualize antes de processar, senão a "diferença" sai calculada errada (o lançamento continua batendo Débito=Crédito, mas a divisão entre as contas fica errada sem avisar). Use "Editar via JSON" pra adicionar um novo grupo.</div>
     <div class="table-wrap"><table class="preview" id="loteamentosTable"></table></div>
     <div class="btn-row">
       <button class="btn ghost" onclick="toggleLoteamentosJson()">Editar via JSON</button>
@@ -1786,15 +1786,37 @@ let loteamentosDB = loadLoteamentos();
 function renderLoteamentosTable(){
   const tbl = document.getElementById("loteamentosTable");
   if(!tbl) return;
-  tbl.innerHTML = `<thead><tr>
-      <th>Palavra-chave</th><th>Modo</th><th>Ordem (rank → conta / valor fixo / parcela)</th>
-    </tr></thead><tbody>` +
-    loteamentosDB.map((l,i)=>`<tr>
-      <td>${l.keyword}</td>
-      <td>${l.modo==="valor_desc"?"Maior→menor":"Ordem de aparição"}</td>
-      <td style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-soft);">${l.ordem.map((o,j)=>`${j+1}ª: conta ${o.conta} (lote ${o.lote} R$${fmtBRL(o.valorFixo)}, parc. ${o.ultimaParcela}/${o.totalParcelas})`).join(' · ')}</td>
-    </tr>`).join("") + `</tbody>`;
+  // Uma linha por lote (não por grupo) — "Valor Base" costuma mudar todo mês (correção
+  // monetária da parcela), então precisa estar editável direto aqui, não só escondido no
+  // JSON — é o campo que mais precisa de atenção antes de processar cada mês.
+  let html = `<thead><tr>
+      <th>Palavra-chave</th><th>Modo</th><th>Lote</th><th>Conta</th><th>Valor Base (confira todo mês!)</th><th>Conta Diferença</th><th>Última Parcela</th><th>Total Parcelas</th>
+    </tr></thead><tbody>`;
+  loteamentosDB.forEach((l,li)=>{
+    l.ordem.forEach((o,oi)=>{
+      html += `<tr>
+        <td>${oi===0?l.keyword:''}</td>
+        <td>${oi===0?(l.modo==="valor_desc"?"Maior→menor":"Ordem de aparição"):''}</td>
+        <td>${o.lote} (QD ${o.qd||''})</td>
+        <td class="cell"><input class="cell-input" style="width:60px" value="${o.conta}" onchange="updateLoteamentoOrdem(${li},${oi},'conta',this.value)"></td>
+        <td class="cell"><input class="cell-input num" value="${fmtBRL(o.valorFixo)}" onchange="updateLoteamentoOrdem(${li},${oi},'valorFixo',this.value)"></td>
+        <td class="cell"><input class="cell-input" style="width:60px" value="${o.contaDiferenca}" onchange="updateLoteamentoOrdem(${li},${oi},'contaDiferenca',this.value)"></td>
+        <td class="cell"><input class="cell-input num" style="width:70px" value="${o.ultimaParcela}" onchange="updateLoteamentoOrdem(${li},${oi},'ultimaParcela',this.value)"></td>
+        <td class="cell"><input class="cell-input num" style="width:70px" value="${o.totalParcelas}" onchange="updateLoteamentoOrdem(${li},${oi},'totalParcelas',this.value)"></td>
+      </tr>`;
+    });
+  });
+  html += `</tbody>`;
+  tbl.innerHTML = html;
   document.getElementById("loteamentosJsonArea").value = JSON.stringify(loteamentosDB, null, 2);
+}
+function updateLoteamentoOrdem(li, oi, field, val){
+  const o = loteamentosDB[li].ordem[oi];
+  if(field==="conta" || field==="contaDiferenca"){ o[field] = Number(val)||null; }
+  else if(field==="valorFixo"){ const n = parseBRL(val); if(n!=null) o.valorFixo = n; }
+  else if(field==="ultimaParcela" || field==="totalParcelas"){ o[field] = Number(val)||0; }
+  saveLoteamentos(loteamentosDB);
+  renderLoteamentosTable();
 }
 function toggleLoteamentosJson(){ document.getElementById("loteamentosJsonBox").classList.toggle("hidden"); }
 function salvarLoteamentosJson(){
@@ -1912,7 +1934,12 @@ function processarLancamentos(){
         return;
       }
       const entries = buildLoteamentoEntries(lot, cfg, l);
-      entries.forEach((e,i)=> rows.push({...e, data:l.data, flag:false, statusText:`OK (lote ${cfg.lote})`}));
+      // valor base desatualizado no cadastro não quebra o balanceamento (a "diferença" é
+      // sempre o que sobra pra fechar), mas se o valor pago no banco ficou MENOR que a base
+      // cadastrada, a diferença dá negativa — sinal de que o valor base precisa ser
+      // atualizado (a parcela só cresce mês a mês, nunca diminui).
+      const diferencaNegativa = entries.some(e=> e.debito===cfg.contaDiferenca && e.valor<0);
+      entries.forEach((e,i)=> rows.push({...e, data:l.data, flag:diferencaNegativa, statusText: diferencaNegativa ? `Diferença negativa — o "Valor Base" do lote ${cfg.lote} no cadastro provavelmente está desatualizado (parcela só cresce, nunca diminui)` : `OK (lote ${cfg.lote})`}));
       cfgsLoteUsados.add(cfg);
       return;
     }
