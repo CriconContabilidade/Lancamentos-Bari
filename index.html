@@ -301,6 +301,17 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
     </div>
   </div>
 
+  <!-- ===================== CADASTRO: FORNECEDORES COM JUROS ===================== -->
+  <div class="card">
+    <div class="section-title">Cadastro — Fornecedores com Juros de Mora (Baixa de Entradas)</div>
+    <div class="help">Fornecedores que a Bari sempre paga em atraso, com juros de mora combinado. Quando a Baixa de Entradas não acha um título que bate exato com um débito desse fornecedor, tenta de novo somando juros simples ao dia (mesma fórmula da <a href="https://criconcontabilidade.github.io/Calculadora-Juros-Multas/" target="_blank">Calculadora de Juros e Multas</a> do Hub) sobre cada título aberto, dentro de 2% de tolerância — sem multa, por enquanto (peça pro Claude adicionar se algum fornecedor cobrar multa fixa também). Linhas casadas assim ficam marcadas "Casado por juros de atraso" pra você conferir antes de exportar.</div>
+    <div class="table-wrap"><table class="preview" id="fornecedoresJurosTable"></table></div>
+    <div class="btn-row">
+      <button class="btn" onclick="addFornecedorJuros()">+ Novo fornecedor</button>
+      <button class="btn ghost" onclick="exportJson('bari_fornecedores_juros_export','fornecedores_juros.json')">Exportar JSON</button>
+    </div>
+  </div>
+
   <footer>Lançamentos Bari · Cricon Contabilidade — uso interno</footer>
 </div>
 
@@ -1300,6 +1311,85 @@ function findBestFornecedor(nomeFrag, nomesFornecedores){
   });
   return bestScore>0 ? best : null;
 }
+/* ---- Cadastro: fornecedores com juros de mora contratual (pagamento sempre em atraso) ----
+   Quando a soma exata falha pra um fornecedor cadastrado aqui, tenta casar cada débito
+   pendente contra os títulos ainda abertos dele usando juros simples ao dia (mesma fórmula
+   da Calculadora de Juros e Multas do Hub: valor_esperado = nominal*(1+taxaDiaPct/100*dias),
+   dias = data do pagamento − vencimento, nunca negativo). Resolve TODOS os débitos pendentes
+   desse fornecedor de uma vez (não um de cada vez) — um casamento guloso, título por título,
+   pode roubar o vencimento certo de outro débito do mesmo valor nominal (já aconteceu: duas
+   parcelas de valor parecido competindo pelo mesmo vencimento, o guloso errou uma por R$400). */
+const FORNECEDORES_JUROS_SEED = [
+  { nome: "comercio e transportes cts silva ltda", taxaDiaPct: 0.03018 },
+];
+function loadFornecedoresJuros(){
+  const raw = localStorage.getItem("bari_fornecedores_juros");
+  const salvo = raw ? JSON.parse(raw) : [];
+  const chaves = new Set(salvo.map(f=>normalizeText(f.nome)));
+  const novos = FORNECEDORES_JUROS_SEED.filter(f=>!chaves.has(normalizeText(f.nome))).map(f=>({...f}));
+  const combinado = [...salvo, ...novos];
+  if(novos.length) saveFornecedoresJuros(combinado);
+  return combinado;
+}
+function saveFornecedoresJuros(list){ localStorage.setItem("bari_fornecedores_juros", JSON.stringify(list)); }
+let fornecedoresJurosDB = loadFornecedoresJuros();
+function renderFornecedoresJurosTable(){
+  const tbl = document.getElementById("fornecedoresJurosTable");
+  if(!tbl) return;
+  tbl.innerHTML = `<thead><tr>
+      <th>Fornecedor (nome exato do Contas a Pagar)</th><th>Juros % ao dia (simples, sem multa)</th><th></th>
+    </tr></thead><tbody>` +
+    fornecedoresJurosDB.map((f,i)=>`<tr>
+      <td class="cell"><input class="cell-input wide" value="${f.nome}" onchange="updateFornecedorJuros(${i},'nome',this.value)"></td>
+      <td class="cell"><input class="cell-input num" style="width:90px" value="${f.taxaDiaPct}" onchange="updateFornecedorJuros(${i},'taxaDiaPct',this.value)"></td>
+      <td><button class="btn small ghost" onclick="removeFornecedorJuros(${i})">✕</button></td>
+    </tr>`).join("") + `</tbody>`;
+}
+function updateFornecedorJuros(i, field, val){
+  if(field==="taxaDiaPct"){ const n=parseBRL(val); fornecedoresJurosDB[i][field] = n!=null?n:0; }
+  else { fornecedoresJurosDB[i][field] = val; }
+  saveFornecedoresJuros(fornecedoresJurosDB);
+}
+function addFornecedorJuros(){ fornecedoresJurosDB.push({nome:"",taxaDiaPct:0}); saveFornecedoresJuros(fornecedoresJurosDB); renderFornecedoresJurosTable(); }
+function removeFornecedorJuros(i){ fornecedoresJurosDB.splice(i,1); saveFornecedoresJuros(fornecedoresJurosDB); renderFornecedoresJurosTable(); }
+
+const JUROS_TOLERANCIA_REL = 0.02; // 2% -- generoso o bastante pra não perder caso legítimo, apertado o bastante pra não juntar coisa errada
+const JUROS_DIAS_MAX = 120;
+function candidatosJuros(lump, titulosAbertos, taxaDiaPct){
+  return titulosAbertos.map(t=>{
+    if(t._used) return null;
+    const dias = diffDays(lump.data, t.vencimento);
+    if(dias < 0 || dias > JUROS_DIAS_MAX) return null;
+    const nominal = saldoOuParcela(t);
+    const esperado = nominal * (1 + (taxaDiaPct/100)*dias);
+    const diff = Math.abs(esperado - lump.valor);
+    if(diff > lump.valor*JUROS_TOLERANCIA_REL) return null;
+    return {titulo:t, dias, esperado, diff, juros: Math.round((lump.valor-nominal)*100)/100};
+  }).filter(Boolean).sort((a,b)=>a.diff-b.diff);
+}
+// Backtracking com poda — resolve todos os débitos pendentes do fornecedor de uma vez,
+// minimizando a soma das diferenças (não greedy). N é sempre pequeno (poucos débitos de um
+// fornecedor por mês), então busca exaustiva com poda é rápida o suficiente.
+function melhorAtribuicaoJuros(lumps, titulosAbertos, taxaDiaPct){
+  const candidatosPorLump = lumps.map(l=>candidatosJuros(l, titulosAbertos, taxaDiaPct));
+  let melhor = null, melhorCusto = Infinity;
+  const usados = new Set();
+  function bt(idx, escolhidos, custo){
+    if(custo >= melhorCusto) return;
+    if(idx === lumps.length){ melhorCusto = custo; melhor = escolhidos.slice(); return; }
+    for(const c of candidatosPorLump[idx]){
+      if(usados.has(c.titulo)) continue;
+      usados.add(c.titulo); escolhidos.push(c);
+      bt(idx+1, escolhidos, custo + c.diff);
+      escolhidos.pop(); usados.delete(c.titulo);
+    }
+    escolhidos.push(null); // deixa esse débito sem casar em vez de travar a busca
+    bt(idx+1, escolhidos, custo + 999999);
+    escolhidos.pop();
+  }
+  bt(0, [], 0);
+  return melhor || lumps.map(()=>null);
+}
 function matchEntradas(lumps, titulosPorFornecedor){
   const nomesFornecedores = Object.keys(titulosPorFornecedor);
   const results = [];
@@ -1360,12 +1450,38 @@ function processarEntradas(){
   abertosPagar.forEach(t=>{ if(!titulosPorFornecedor[t.nome]) titulosPorFornecedor[t.nome]=[]; titulosPorFornecedor[t.nome].push({...t}); });
 
   const results = matchEntradas(extratoEntradasState.lumps, titulosPorFornecedor);
+
+  // 2ª passada: fornecedores com juros de mora cadastrado tentam casar o que sobrou (soma
+  // exata falhou) contra os títulos ainda abertos DESSE fornecedor, via juros de atraso —
+  // resolve todos os débitos pendentes do fornecedor juntos, não um de cada vez (ver
+  // melhorAtribuicaoJuros).
+  const pendentesPorFornecedor = {};
+  results.forEach(r=>{ if(!r.titulos && r.forn){ if(!pendentesPorFornecedor[r.forn]) pendentesPorFornecedor[r.forn]=[]; pendentesPorFornecedor[r.forn].push(r); } });
+  Object.keys(pendentesPorFornecedor).forEach(forn=>{
+    const cfgJuros = fornecedoresJurosDB.find(f=>normalizeText(f.nome)===normalizeText(forn));
+    if(!cfgJuros) return;
+    const pendentes = pendentesPorFornecedor[forn];
+    const abertos = (titulosPorFornecedor[forn]||[]).filter(t=>!t._used);
+    const atribuicao = melhorAtribuicaoJuros(pendentes.map(r=>r.lump), abertos, cfgJuros.taxaDiaPct);
+    atribuicao.forEach((c, idx)=>{
+      if(!c) return;
+      c.titulo._used = true;
+      pendentes[idx].jurosMatch = c;
+    });
+  });
+
   const rows = [];
   results.forEach(r=>{
     if(r.titulos){
       r.titulos.forEach(t=> rows.push(buildEntradaRow(t, r.lump.data, null, "OK")));
+    } else if(r.jurosMatch){
+      const cfgJuros = fornecedoresJurosDB.find(f=>normalizeText(f.nome)===normalizeText(r.forn));
+      const c = r.jurosMatch;
+      rows.push(buildEntradaRow(c.titulo, r.lump.data, "warn",
+        `Casado por juros de atraso (${c.dias}d, ${fmtBRL(cfgJuros.taxaDiaPct)}% a.d., R$ ${fmtBRL(c.juros)} de juros já embutidos no valor pago) — confira`,
+        {valorPago:r.lump.valor, juros:c.juros}));
     } else if(r.forn){
-      rows.push(buildEntradaRowPendente(r.lump, r.forn, "err", `Fornecedor "${r.forn}" identificado, mas nenhum título aberto bate exato com R$ ${fmtBRL(r.lump.valor)}`));
+      rows.push(buildEntradaRowPendente(r.lump, r.forn, "err", `Fornecedor "${r.forn}" identificado, mas nenhum título aberto bate exato (nem com juros de atraso) com R$ ${fmtBRL(r.lump.valor)}`));
     } else {
       rows.push(buildEntradaRowPendente(r.lump, null, "err", "Fornecedor não identificado pelo nome no histórico — confira manualmente"));
     }
@@ -1373,14 +1489,22 @@ function processarEntradas(){
   entradasRowsState = rows;
   renderEntradasResult(rows, extratoEntradasState.semNome, contasPagarState.empresaNome, contasPagarState.empresaCnpj);
 }
-function buildEntradaRow(titulo, dataBaixa, statusClass, statusText){
+function buildEntradaRow(titulo, dataBaixa, statusClass, statusText, jurosInfo){
   const cnpjInfo = resolverCnpj(contasPagarState.empresaCnpj, "fornecedor", titulo.codigo, titulo.nome);
   const cls = !cnpjInfo ? "err" : (cnpjInfo.confiavel ? statusClass : "warn");
   const txt = !cnpjInfo ? "CNPJ não encontrado no cadastro" : (cnpjInfo.confiavel ? statusText : `${statusText} — CNPJ por nome aproximado, confira`);
+  // Quando casado por juros de atraso, "Valor Pago" precisa ser o valor TOTAL efetivamente
+  // debitado no banco (nominal + juros já embutido) — mesma lição já aprendida na Baixa de
+  // Serviços: o Domínio fecha o título pelo valor da coluna principal, sem somar a coluna de
+  // juros por cima. Por isso "juros" fica 0 no que é exportado (já está dentro de "valor") —
+  // o valor calculado do juros só aparece no statusText, pra conferência visual, e continua
+  // editável na tabela caso o usuário prefira separar manualmente.
   return {
     numero: titulo.documento, cnpj: cnpjInfo ? cnpjInfo.documento : "", nome: cnpjInfo ? cnpjInfo.nome : titulo.nome,
-    vencimento: titulo.vencimento, databaixa: dataBaixa, valor: saldoOuParcela(titulo),
-    juros:0, multa:0, desconto:0, statusClass: cls, statusText: txt, codigo: titulo.codigo,
+    vencimento: titulo.vencimento, databaixa: dataBaixa,
+    valor: jurosInfo ? jurosInfo.valorPago : saldoOuParcela(titulo),
+    juros: 0,
+    multa:0, desconto:0, statusClass: cls, statusText: txt, codigo: titulo.codigo,
     incluir: cls !== "err",
   };
 }
@@ -2142,6 +2266,7 @@ function downloadLancTxt(){
 renderPadroesTable();
 renderEmprestimosTable();
 renderLoteamentosTable();
+renderFornecedoresJurosTable();
 </script>
 
 <script type="module">
