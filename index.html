@@ -1724,11 +1724,27 @@ async function parseExtratoSicoobTodos(file){
   const pm = fullText.match(/Periodo:\s*\d{2}\/\d{2}\/(\d{4})\s*-\s*\d{2}\/\d{2}\/(\d{4})/i);
   const anoRef = pm ? parseInt(pm[2]) : new Date().getFullYear();
   const linhas = [];
+  const saldos = [];
   for(let i=0;i<allLines.length;i++){
     const dm = allLines[i].match(/^(\d{2})\/(\d{2})\s+(.*)$/);
     if(!dm) continue;
     const [, dd, mm, rest] = dm;
-    if(/^SALDO/i.test(rest.trim())) continue;
+    const restTrim = rest.trim();
+    // "SALDO DO DIA" (e "SALDO ANTERIOR", saldo de fechamento do dia útil anterior ao período)
+    // são o saldo em conta corrente já com o cheque especial usado embutido — servem pra
+    // detectar dias com saldo negativo, não viram lançamento por si (por isso ficam num array
+    // separado, "saldos", em vez de "linhas"). "SALDO BLOQUEADO ANTERIOR" é outra coisa
+    // (valores bloqueados judicialmente) e é ignorado de propósito.
+    if(/^SALDO (DO DIA|ANTERIOR)$/i.test(restTrim)){
+      const valLine = allLines[i+1];
+      const vm = valLine && valLine.match(/^R\$\s*([\d.,]+)([CD])$/);
+      if(vm){
+        const abs = parseBRL(vm[1]);
+        saldos.push({data:{y:anoRef, m:parseInt(mm), d:parseInt(dd)}, valor: vm[2]==="D" ? -abs : abs, anterior: /ANTERIOR/i.test(restTrim)});
+      }
+      continue;
+    }
+    if(/^SALDO/i.test(restTrim)) continue;
     const valLine = allLines[i+1];
     const vm = valLine && valLine.match(/^R\$\s*([\d.,]+)([CD])$/);
     if(!vm) continue;
@@ -1743,6 +1759,7 @@ async function parseExtratoSicoobTodos(file){
     }
     linhas.push({data:{y:anoRef, m:parseInt(mm), d:parseInt(dd)}, documento, historico:hist, nomeFrag, valor:parseBRL(vm[1]), tipo:vm[2]});
   }
+  linhas.saldos = saldos;
   return linhas;
 }
 
@@ -2076,6 +2093,28 @@ function buildEmprestimoEntries(emp, linha){
     valor: p.valor, hist, complemento:null, iniciaLote: i===0?1:null, origem: linha.historico,
   }));
 }
+// Saldo negativo (cheque especial usado) precisa sair da conta banco (20) e ir pra conta 26
+// (cheque especial) — senão o razão mostra um "banco" com saldo devedor, o que não existe de
+// verdade (é uma dívida, não caixa negativo). Quando volta a ficar positivo, reverte tudo.
+// Se ficar vários dias seguidos negativo, só lança a DIFERENÇA de saldo de um dia pro outro
+// (não o valor negativo inteiro de novo a cada dia) — senão duplica a compensação.
+function buildSaldoNegativoLancamentos(saldos){
+  if(!saldos || !saldos.length) return [];
+  const ordenados = [...saldos].sort((a,b)=> partsToDate(a.data)-partsToDate(b.data));
+  const anterior = ordenados.find(s=>s.anterior);
+  let accumComp = (anterior && anterior.valor < 0) ? Math.abs(anterior.valor) : 0;
+  const rows = [];
+  ordenados.filter(s=>!s.anterior).forEach(s=>{
+    const negativo = s.valor < 0 ? Math.abs(s.valor) : 0;
+    if(negativo > accumComp){
+      rows.push({data:s.data, debito:26, credito:20, valor: negativo - accumComp, hist:"COMPENSAÇÃO DE SALDO NEGATIVADO EM CHEQUE ESPECIAL - SICOOB", complemento:null, iniciaLote:1, flag:false, statusText:"OK (saldo ficou negativo / mais negativo — compensação em cheque especial)"});
+    } else if(negativo < accumComp){
+      rows.push({data:s.data, debito:20, credito:26, valor: accumComp - negativo, hist:"COMPENSAÇÃO DE SALDO NEGATIVADO EM CHEQUE ESPECIAL - SICOOB", complemento:null, iniciaLote:1, flag:false, statusText: negativo===0 ? "OK (saldo voltou a ficar positivo — reversão da compensação)" : "OK (saldo negativo diminuiu — reversão parcial da compensação)"});
+    }
+    accumComp = negativo;
+  });
+  return rows;
+}
 let lancExtratoState = null;
 wireDropzone("extratoLancDrop","extratoLancFile", async (f,d)=>{
   const status = document.getElementById("lancStatus");
@@ -2181,6 +2220,7 @@ function processarLancamentos(){
     if(l.tipo==="C") d=20; else c=20;
     rows.push({data:l.data, debito:d, credito:c, valor:l.valor, hist:null, complemento:l.historico + (l.nomeFrag?(" "+l.nomeFrag):""), iniciaLote:1, flag:true, statusText:"Sem padrão cadastrado — complete a outra conta à mão"});
   });
+  rows.push(...buildSaldoNegativoLancamentos(linhas.saldos));
   // só confirma (incrementa) a última parcela dos contratos/lotes que realmente geraram lançamento nesta rodada
   contratosUsados.forEach(emp=>{ if(emp._ultimaParcelaPendente!=null){ emp.ultimaParcela = emp._ultimaParcelaPendente; delete emp._ultimaParcelaPendente; } });
   if(contratosUsados.size) saveEmprestimos(emprestimosDB);
